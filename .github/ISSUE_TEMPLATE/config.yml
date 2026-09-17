@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题报告
+    url: https://github.com/fshoocn/cordis-port/security/advisories/new
+    about: 请勿通过公开 Issue 报告安全漏洞
+  - name: 上游项目 cordis
+    url: https://github.com/cordiverse/cordis
+    about: 关于框架设计理念与 TypeScript 原版实现的问题
+  - name: 文档与用法说明
+    url: https://github.com/fshoocn/cordis-port#readme
+    about: 快速开始、API 速查与移植基线说明

@@ -1,0 +1,58 @@
+name: 功能建议
+description: 提出新功能或改进建议
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢建议！由于本库是上游 [cordis](https://github.com/cordiverse/cordis) 的移植，
+        涉及 API 语义的改动会优先与上游保持一致。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 Issue，确认这不是重复建议
+          required: true
+        - label: 我已确认上游 cordis 是否有对应能力（若无，属于移植差异请选"功能缺口"）
+          required: false
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 建议类型
+      options:
+        - 移植缺口（上游已有但本库未实现）
+        - 易用性改进（文档、错误提示等）
+        - 性能优化
+        - 新增能力（上游没有）
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述你遇到的困难或场景，而不是直接跳到方案
+      placeholder: 我在做 XXX 时遇到 YYY，希望能 ZZZ
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的方案
+      description: 若有 API 设想，可给出使用示例
+      render: python
+    validations:
+      required: false
+
+  - type: textarea
+    id: upstream
+    attributes:
+      label: 上游对应实现（如适用）
+      description: 若上游 cordis 已有对应实现，请附上 TypeScript 源码或文档链接
+    validations:
+      required: false

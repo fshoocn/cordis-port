@@ -1,0 +1,42 @@
+# 生成 release notes 时按标签分类
+# https://docs.github.com/repositories/releasing-projects-on-github/automatically-generated-release-notes
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - duplicate
+      - invalid
+      - wontfix
+    authors:
+      - dependabot
+      - github-actions
+
+  categories:
+    - title: ⚠️ 破坏性变更
+      labels:
+        - breaking
+        - breaking-change
+
+    - title: ✨ 新功能
+      labels:
+        - enhancement
+        - feature
+
+    - title: 🐛 问题修复
+      labels:
+        - bug
+        - fix
+
+    - title: 📖 文档
+      labels:
+        - documentation
+        - docs
+
+    - title: ⚡ 性能与重构
+      labels:
+        - performance
+        - refactor
+
+    - title: 🔧 其他变更
+      labels:
+        - "*"

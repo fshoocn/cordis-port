@@ -1,0 +1,92 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写完整信息，这能大幅加快定位速度。
+
+        > ⚠️ 安全问题请勿在此提交，请参考 [SECURITY.md](../blob/main/SECURITY.md)。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 Issue，确认这不是重复问题
+          required: true
+        - label: 我使用的是最新版本
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？期望发生什么？
+      placeholder: |
+        实际行为：
+        期望行为：
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现代码
+      description: 能独立运行的最小示例，包含插件定义与加载过程
+      render: python
+      placeholder: |
+        import asyncio
+        from cordis import Context, Service
+
+        # ...最小复现代码...
+    validations:
+      required: true
+
+  - type: textarea
+    id: traceback
+    attributes:
+      label: 完整报错信息
+      description: 若有异常，请粘贴完整 traceback（含 "Outer stack" 部分，它包含长栈信息）
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      description: 使用 `pip show cordis-port` 或 git 提交短号
+      placeholder: "例如：0.1.0 或 1997b61"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python 版本
+      description: 运行 `python --version`
+      placeholder: "例如：3.12.4"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: "例如：Windows 11 / Ubuntu 24.04 / macOS 15"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式
+      options:
+        - git clone（仓库根目录即包目录）
+        - pip install cordis-port
+        - 其他（请在下方说明）
+    validations:
+      required: false

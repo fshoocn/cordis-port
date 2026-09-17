@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cordis-port"
+version = "0.1.0"
+description = "Python port of cordis: a plugin runtime with dependency injection, service container and event bus"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "fanshuhua", email = "github@fanshuhua.com" }]
+keywords = [
+    "cordis",
+    "plugin",
+    "plugin-system",
+    "plugin-framework",
+    "dependency-injection",
+    "ioc",
+    "ioc-container",
+    "service-container",
+    "event-bus",
+    "asyncio",
+    "runtime",
+    "framework",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/fshoocn/cordis-port"
+Repository = "https://github.com/fshoocn/cordis-port"
+Issues = "https://github.com/fshoocn/cordis-port/issues"
+Changelog = "https://github.com/fshoocn/cordis-port/releases"
+Upstream = "https://github.com/cordiverse/cordis"
+
+# 仓库根目录同时就是包目录（clone 下来即可 `import cordis`，无需构建）。
+# 这里把根目录映射为名为 ``cordis`` 的包，从而在保持该布局的前提下
+# 依然能够正常构建 wheel / 发布到 PyPI。
+[tool.setuptools]
+packages = ["cordis"]
+
+[tool.setuptools.package-dir]
+cordis = "."
+
+[tool.setuptools.package-data]
+cordis = ["py.typed"]

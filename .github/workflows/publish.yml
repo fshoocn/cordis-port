@@ -1,0 +1,160 @@
+name: Publish
+
+# 触发方式：推送形如 v0.1.0 的标签，或在 Actions 页面手动触发
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 构建发行包
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: cordis           # 见 ci.yml 说明：包目录名必须为 cordis
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装构建工具
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: 校验版本号与标签一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(python - <<'PY'
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(data["project"]["version"])
+          PY
+          )
+          echo "标签版本: $TAG"
+          echo "配置版本: $VER"
+          if [ "$TAG" != "$VER" ]; then
+            echo "错误: 标签 $GITHUB_REF_NAME 与 pyproject.toml 中的版本 $VER 不一致"
+            exit 1
+          fi
+          echo "版本校验通过"
+
+      - name: 构建 sdist 与 wheel
+        run: python -m build
+
+      - name: 检查发行包元数据
+        run: twine check dist/*
+
+      - name: 安装并冒烟测试
+        working-directory: ..
+        run: |
+          pip install "$GITHUB_WORKSPACE"/cordis/dist/*.whl
+          cd "${{ runner.temp }}"
+          python - <<'PY'
+          import asyncio
+          import cordis
+          from cordis import Context, Service
+
+          print("导出数:", len(cordis.__all__))
+
+
+          class Svc(Service):
+              provide = "svc"
+
+              def __init__(self, ctx, config=None):
+                  super().__init__(ctx)
+                  self.v = 42
+
+
+          class P:
+              def __init__(self, ctx, config=None):
+                  self.ctx = ctx
+
+              def init(self):
+                  Svc(self.ctx)
+
+
+          async def main():
+              ctx = Context()
+              await ctx.plugin(P)
+              assert ctx.svc.v == 42
+              seen = []
+              ctx.on("e", lambda x: seen.append(x))
+              ctx.emit("e", 1)
+              assert seen == [1]
+              print("发行包冒烟测试通过")
+
+
+          asyncio.run(main())
+          PY
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: cordis/dist/
+
+  publish:
+    name: 发布到 PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # 仅在推送标签时发布；手动触发只构建不发布
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    # PyPI 可信发布（Trusted Publishing）：无需在仓库中保存 API Token。
+    # 需先在 PyPI 项目设置里配置本工作流为可信发布者，
+    # 参见 README「发布到 PyPI」一节。
+    environment:
+      name: pypi
+      url: https://pypi.org/p/cordis-port
+
+    permissions:
+      id-token: write          # OIDC 令牌，供可信发布使用
+
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 列出待发布文件
+        run: ls -la dist/
+
+      - name: 发布到 PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: 创建 GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: 创建 Release 并附加发行包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes
