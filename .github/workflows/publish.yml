@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+# 强制 Python 使用 UTF-8（见 ci.yml 同名说明）
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   build:
     name: 构建发行包
