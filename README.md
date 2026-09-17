@@ -597,6 +597,7 @@ cd ..; python -c "import cordis_port; print(len(cordis_port.__all__), 'exports')
 >
 > 导入名与上游 TS 包名（`cordis`）不同，但**类名、方法名、服务名均保持一致**，
 > 对照上游文档时只需注意导入路径的差异。
+
 ### 首次配置（仅需一次）
 
 **1. 注册 PyPI 账号并开启 2FA**
