@@ -207,7 +207,7 @@ def is_aggregate_error(error: Any) -> TypeGuard[_AggregateErrorLike]:
     """Port of ``isAggregateError``.
 
     判断是否为「聚合异常」：``BaseException`` 且带 ``errors`` 列表/元组
-    （:class:`~common.cordis.events.EventDispatchError` 即属此类）。
+    （:class:`~common.cordis_port.events.EventDispatchError` 即属此类）。
     """
     return isinstance(error, BaseException) and isinstance(getattr(error, "errors", None), (list, tuple))
 

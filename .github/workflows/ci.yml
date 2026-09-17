@@ -23,26 +23,29 @@ jobs:
     defaults:
       run:
         shell: bash
+        # 包目录（仓库根即包目录）在 workspace 下名为 cordis_port，
+        # 因此默认在包目录内执行；需要从「父目录」导入的步骤会单独覆盖为 '.'。
+        working-directory: cordis_port
 
     steps:
-      # 本项目要求包目录名为 cordis（仓库根目录即包目录），
-      # 但 GitHub 默认检出到以仓库名命名的目录（cordis-port）。
-      # 这里显式指定 path 为 cordis，使 ``working-directory: ..`` 成为可导入的 path 根。
+      # 本项目采用「仓库根目录即包目录」的扁平布局，包名为 cordis_port。
+      # 这里显式检出到 workspace 下的 cordis_port/，使 workspace 根目录
+      # 正好成为可导入 cordis_port 的 sys.path 根。
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          path: cordis
+          path: cordis_port
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: 目录布局检查
         run: |
           echo "包目录: $(pwd)  (basename: $(basename "$(pwd)"))"
-          test "$(basename "$(pwd)")" = "cordis" \
-            || { echo "错误: 检出目录名不是 cordis，import cordis 将失败"; exit 1; }
+          test "$(basename "$(pwd)")" = "cordis_port" \
+            || { echo "错误: 检出目录名不是 cordis_port，import cordis_port 将失败"; exit 1; }
           test -f __init__.py || { echo "错误: 未在包目录中运行"; exit 1; }
           echo "布局检查通过"
 
@@ -57,13 +60,13 @@ jobs:
           PY
 
       - name: 导入与导出表检查
-        working-directory: ..
+        working-directory: .
         run: |
           python -c "
-          import cordis
-          missing = [n for n in cordis.__all__ if not hasattr(cordis, n)]
+          import cordis_port
+          missing = [n for n in cordis_port.__all__ if not hasattr(cordis_port, n)]
           assert not missing, f'__all__ 中存在未定义的名字: {missing}'
-          print(f'导入通过: {len(cordis.__all__)} 个导出')
+          print(f'导入通过: {len(cordis_port.__all__)} 个导出')
           "
 
       - name: 构建并安装 wheel
@@ -77,19 +80,19 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           python -c "
-          import cordis, inspect, os
-          path = os.path.dirname(inspect.getfile(cordis))
+          import cordis_port, inspect, os
+          path = os.path.dirname(inspect.getfile(cordis_port))
           print('包路径:', path)
           assert 'site-packages' in path, f'未从 site-packages 导入: {path}'
-          print('安装版导入通过, 导出数:', len(cordis.__all__))
+          print('安装版导入通过, 导出数:', len(cordis_port.__all__))
           "
 
       - name: 冒烟测试
-        working-directory: ..
+        working-directory: .
         run: |
           python - <<'PY'
           import asyncio
-          from cordis import Context, Service
+          from cordis_port import Context, Service
 
 
           class Counter(Service):

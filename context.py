@@ -24,7 +24,7 @@ API identical.
 * **拦截（intercept）**：``ctx.intercept('foo', config)`` 为名字叠加配置层，优先级
   高于外层，供服务读取自己那份被覆盖的配置。
 * **属性分派**：读取未命中的名字时不直接报错，而是交给 ``reflect.handler_get``
-  走「服务解析」流程（详见 :mod:`common.cordis.reflect`）。
+  走「服务解析」流程（详见 :mod:`common.cordis_port.reflect`）。
 """
 
 from __future__ import annotations

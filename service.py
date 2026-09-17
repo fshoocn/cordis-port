@@ -5,7 +5,7 @@ Registered through ``ctx.reflect.provide`` and carrying a ``Tracker`` so that
 
 The official class implements symbol-keyed members (``[symbols.invoke]``,
 ``[symbols.filter]`` ...).  Python has no symbol keys, so subclasses define the
-dunder methods below and :mod:`common.cordis.utils` maps the protocol symbols
+dunder methods below and :mod:`common.cordis_port.utils` maps the protocol symbols
 onto them:
 
 ===========================  ==========================
@@ -29,12 +29,12 @@ official symbol              Python method
 
 1. **注册**：构造时调用 ``ctx.reflect.provide(name, self, check)``，把自己登记
    到 ``ctx.reflect.store`` 中，键是该服务名对应的符号（symbol）。
-2. **依赖追踪**：每个服务携带一个 :class:`~common.cordis.utils.Tracker`，其中
+2. **依赖追踪**：每个服务携带一个 :class:`~common.cordis_port.utils.Tracker`，其中
    ``property="ctx"``、``associate=服务名``。这样 ``ctx.foo.bar`` 会被解析为
    ``ctx.foo``（拿到服务实例）后再取 ``bar``，而 ``ctx['foo.bar']`` 这种带点
    的写法则由 ``tracker.associate`` 兜底解析。
 3. **协议映射**：官方 TS 使用符号键成员（``[symbols.invoke]`` 等），Python 没有
-   符号键语法，因此由 :mod:`common.cordis.utils` 的 ``register_protocol`` 把每个
+   符号键语法，因此由 :mod:`common.cordis_port.utils` 的 ``register_protocol`` 把每个
    符号映射到一个 dunder 方法上（见上表），子类只要实现对应 dunder 即可。
 4. **可调用服务**：实现了 ``__invoke__`` 的服务可以像函数一样调用，例如
    ``ctx.logger('name')``。
@@ -238,7 +238,7 @@ class Service(Generic[ConfigT]):
     def __get_symbol__(self, symbol: Any, default: Any = None) -> Any:
         """自定义符号查找：实例字典 → ``__proto__`` 原型链 → 协议 dunder。
 
-        这让 :func:`common.cordis.utils.get_symbol` 对服务实例也能正常工作，
+        这让 :func:`common.cordis_port.utils.get_symbol` 对服务实例也能正常工作，
         与官方基于原型链的符号继承语义保持一致。
         """
         state = getattr(self, "__dict__", {})

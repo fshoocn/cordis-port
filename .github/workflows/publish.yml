@@ -15,14 +15,20 @@ jobs:
     name: 构建发行包
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        shell: bash
+        # 包目录在 workspace 下名为 cordis_port（见 ci.yml 说明）
+        working-directory: cordis_port
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          path: cordis           # 见 ci.yml 说明：包目录名必须为 cordis
+          path: cordis_port
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -56,16 +62,16 @@ jobs:
         run: twine check dist/*
 
       - name: 安装并冒烟测试
-        working-directory: ..
+        working-directory: .
         run: |
-          pip install "$GITHUB_WORKSPACE"/cordis/dist/*.whl
+          pip install cordis_port/dist/*.whl
           cd "${{ runner.temp }}"
           python - <<'PY'
           import asyncio
-          import cordis
-          from cordis import Context, Service
+          import cordis_port
+          from cordis_port import Context, Service
 
-          print("导出数:", len(cordis.__all__))
+          print("导出数:", len(cordis_port.__all__))
 
 
           class Svc(Service):
@@ -99,10 +105,10 @@ jobs:
           PY
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dist
-          path: cordis/dist/
+          path: cordis_port/dist/
 
   publish:
     name: 发布到 PyPI
@@ -123,7 +129,7 @@ jobs:
 
     steps:
       - name: 下载构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist/
@@ -144,7 +150,7 @@ jobs:
 
     steps:
       - name: 下载构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist/

@@ -64,10 +64,10 @@ pip install "git+https://github.com/fshoocn/cordis-port.git@8fbc905"
 pip install cordis-port
 ```
 
-两种方式导入名都是 `cordis`：
+两种方式导入名都是 `cordis_port`：
 
 ```python
-from cordis import Context
+from cordis_port import Context
 ```
 
 > **安装方式对比**
@@ -84,18 +84,18 @@ from cordis import Context
 **方式一：克隆到项目内（推荐用于参与开发）**
 
 ```powershell
-git clone https://github.com/fshoocn/cordis-port.git cordis
+git clone https://github.com/fshoocn/cordis-port.git cordis_port
 ```
 
-> **关键要求是包目录必须命名为 `cordis`**（否则 `import cordis` 无法生效）。
+> **关键要求是包目录必须命名为 `cordis_port`**（否则 `import cordis_port` 无法生效）。
 > 若克隆时未指定目录名，需手动重命名：
 
 ```powershell
 git clone https://github.com/fshoocn/cordis-port.git
-Rename-Item cordis-port cordis
+Rename-Item cordis-port cordis_port
 ```
 
-之后在 `cordis/` 的**父目录**运行代码，即可 `import cordis`。
+之后在 `cordis_port/` 的**父目录**运行代码，即可 `import cordis_port`。
 
 **方式二：从本地目录安装**
 
@@ -106,13 +106,12 @@ pip install -e path/to/cordis-port
 # 普通安装
 pip install path/to/cordis-port
 ```
-
 **方式三：加入 `sys.path`**
 
 ```python
 import sys
-sys.path.insert(0, r"path/to/cordis-parent")   # 含 cordis/ 目录的那一级
-from cordis import Context
+sys.path.insert(0, r"path/to/cordis-port-parent")   # 含 cordis_port/ 目录的那一级
+from cordis_port import Context
 ```
 
 **从源码构建（可选）**
@@ -129,10 +128,10 @@ python -m build          # 产物在 dist/
 python -c "import ast, pathlib; [ast.parse(f.read_text(encoding='utf-8')) for f in pathlib.Path('.').glob('*.py')]; print('OK')"
 
 # 导出表检查（在仓库的父目录运行）
-python -c "import cordis; print(len(cordis.__all__), 'exports')"
+python -c "import cordis_port; print(len(cordis_port.__all__), 'exports')"
 ```
 
-> 本项目要求包目录名为 `cordis`，仓库根目录即为包目录。
+> 本项目要求包目录名为 `cordis_port`，仓库根目录即为包目录。
 > `pyproject.toml` 已通过 `package-dir` 映射处理了该布局，
 > 因此 pip（无论从网络还是本地）安装时都能正确识别包名。
 
@@ -180,7 +179,7 @@ stateDiagram-v2
 
 ```python
 import asyncio
-from cordis import Context
+from cordis_port import Context
 
 class Greeter:
     def __init__(self, ctx, config):
@@ -204,7 +203,7 @@ asyncio.run(main())
 继承 `Service` 并声明 `provide`（服务名）；构造即注册：
 
 ```python
-from cordis import Service
+from cordis_port import Service
 
 class Counter(Service):
     provide = "counter"
@@ -254,7 +253,7 @@ class B:
         self.ctx = ctx
 
 # (c) 装饰器形式：依赖就绪后自动调用被装饰方法
-from cordis import Inject
+from cordis_port import Inject
 
 class C(Service):
     provide = "consumer"
@@ -471,11 +470,17 @@ print(ctx.logger.buffer[-1].name)
 
 ### 命名约定
 
-包内同时导出两套名字，指向同一对象：
+导入名为 `cordis_port`，与发布名 `cordis-port` 对应：
 
 ```python
-from cordis import is_context, isContext     # 二者相同
-from cordis import resolve_inject, resolveInject
+from cordis_port import Context, Service, Inject
+```
+
+包内同时导出两套 API 名字，指向同一对象：
+
+```python
+from cordis_port import is_context, isContext     # 二者相同
+from cordis_port import resolve_inject, resolveInject
 ```
 
 `snake_case` 为 Python 风格（代码内部与文档统一使用），`camelCase` 与官方
@@ -573,7 +578,7 @@ git -C cordis checkout f8ea3cd50f1a5724e8e715995bcde131c9c12b2c
 ```powershell
 # 本地等价于 CI 的快速检查（在仓库根目录）
 python -c "import ast, pathlib; [ast.parse(f.read_text(encoding='utf-8')) for f in pathlib.Path('.').glob('*.py')]; print('语法 OK')"
-cd ..; python -c "import cordis; print(len(cordis.__all__), 'exports')"
+cd ..; python -c "import cordis_port; print(len(cordis_port.__all__), 'exports')"
 ```
 
 ---
@@ -583,28 +588,15 @@ cd ..; python -c "import cordis; print(len(cordis.__all__), 'exports')"
 仓库已配置自动发布工作流（`.github/workflows/publish.yml`），
 推送标签即会自动构建并发布，**无需在仓库中保存任何密钥**（使用 PyPI 可信发布）。
 
-> 本项目的发布名为 **`cordis-port`**，导入名仍为 `cordis`。
+> 本项目发布名为 **`cordis-port`**，导入名为 **`cordis_port`**（连字符不能作导入名，
+> 下划线是 Python 打包的标准映射）。
 >
-> 之所以不用更短的 `cordis-py` 之类名字：PyPI 上已有 `py-cordis`、`cordis-python`、
-> `python-cordis`、`cordispy`、`cordis` 等多个 cordis 相关包，命名过于相似会造成混淆。
-> `cordis-port` 与它们都有足够区分度。
-
-### ⚠️ 关于同名的 `cordis` 占位包
-
-PyPI 上存在一个 2024 年发布的 `cordis` 占位包（版本 `0.0.0`），它**也提供一个顶层
-`cordis` 模块**。因此请不要在同一环境中同时安装：
-
-```powershell
-pip install cordis-port   # ✅ 本包
-pip install cordis        # ❌ 无关的占位包，会覆盖本包的 cordis 模块
-```
-
-若怀疑被覆盖，可用以下命令确认包的来源：
-
-```powershell
-python -c "import cordis, inspect, os; print(os.path.dirname(inspect.getfile(cordis)))"
-```
-
+> 之所以叫 `cordis-port` 而不叫更短的 `cordis-py`：PyPI 上已有 `py-cordis`、
+> `cordis-python`、`python-cordis`、`cordispy`、`cordis` 等多个 cordis 相关包，
+> 命名过于相似会造成混淆。`cordis-port` 与它们都有足够区分度。
+>
+> 导入名与上游 TS 包名（`cordis`）不同，但**类名、方法名、服务名均保持一致**，
+> 对照上游文档时只需注意导入路径的差异。
 ### 首次配置（仅需一次）
 
 **1. 注册 PyPI 账号并开启 2FA**

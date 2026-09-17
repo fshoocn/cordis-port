@@ -39,7 +39,7 @@ body:
       render: python
       placeholder: |
         import asyncio
-        from cordis import Context, Service
+        from cordis_port import Context, Service
 
         # ...最小复现代码...
     validations:

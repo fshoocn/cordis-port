@@ -17,7 +17,7 @@
 1. :meth:`RegistryService.resolve` 把各种形态的插件（类/函数/带 ``apply`` 的对象/
    字典）统一解析成「回调」；
 2. 若该回调尚无 :class:`Runtime`，读取其 ``name``/``inject``/``Config`` 等元信息创建；
-3. 用 ``parent.registry.counter`` 分配 uid，创建 :class:`~common.cordis.fiber.Fiber`；
+3. 用 ``parent.registry.counter`` 分配 uid，创建 :class:`~common.cordis_port.fiber.Fiber`；
 4. fiber 在父 fiber 的 effect 中绑定：解析配置、检查依赖、加载插件本体；
    依赖不满足或配置非法时 fiber 处于非激活状态，等待依赖或配置变化后自动重载。
 """
@@ -422,7 +422,7 @@ class RegistryService:
         1. 解析插件为回调（失败即 ``TypeError``）；
         2. 校验当前 fiber 处于激活状态（不允许在已卸载上下文上加载）；
         3. 按回调查找/创建 :class:`Runtime`（同名回调复用，因此可多次加载）；
-        4. 归一化依赖声明，创建 :class:`~common.cordis.fiber.Fiber`。
+        4. 归一化依赖声明，创建 :class:`~common.cordis_port.fiber.Fiber`。
 
         返回的 fiber 可直接 ``await``（``Fiber.__await__``），用于等待插件加载完成。
         """

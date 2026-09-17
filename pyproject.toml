@@ -46,14 +46,14 @@ Issues = "https://github.com/fshoocn/cordis-port/issues"
 Changelog = "https://github.com/fshoocn/cordis-port/releases"
 Upstream = "https://github.com/cordiverse/cordis"
 
-# 仓库根目录同时就是包目录（clone 下来即可 `import cordis`，无需构建）。
-# 这里把根目录映射为名为 ``cordis`` 的包，从而在保持该布局的前提下
+# 仓库根目录同时就是包目录（clone 下来即可 `import cordis_port`，无需构建）。
+# 这里把根目录映射为名为 ``cordis_port`` 的包，从而在保持该布局的前提下
 # 依然能够正常构建 wheel / 发布到 PyPI。
 [tool.setuptools]
-packages = ["cordis"]
+packages = ["cordis_port"]
 
 [tool.setuptools.package-dir]
-cordis = "."
+cordis_port = "."
 
 [tool.setuptools.package-data]
-cordis = ["py.typed"]
+cordis_port = ["py.typed"]

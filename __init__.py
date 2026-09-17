@@ -5,7 +5,7 @@ module), with camelCase aliases kept alongside the Pythonic names.
 
 中文说明
 --------
-``common.cordis`` 是 cordiverse/cordis（TS 版）核心包 ``packages/core`` 的
+``common.cordis_port`` 是 cordiverse/cordis（TS 版）核心包 ``packages/core`` 的
 Python 移植，实现了「插件化 + 依赖注入 + 事件总线」的运行时框架。
 
 模块结构（对应官方同名文件）：
@@ -13,14 +13,14 @@ Python 移植，实现了「插件化 + 依赖注入 + 事件总线」的运行�
 =========================  ================================================
 模块                        职责
 =========================  ================================================
-:mod:`~common.cordis.context`    ``Context``：插件门面（服务访问入口）
-:mod:`~common.cordis.fiber`      ``Fiber``：插件生命周期与副作用调度
-:mod:`~common.cordis.registry`   插件注册表与 ``@Inject`` 依赖声明
-:mod:`~common.cordis.reflect`    服务仓库与属性访问路由（依赖注入核心）
-:mod:`~common.cordis.events`     事件总线（五种派发模式）
-:mod:`~common.cordis.logger`     日志服务与格式化/导出
-:mod:`~common.cordis.service`    服务基类
-:mod:`~common.cordis.utils`      基础设施（符号、原型链、追踪代理）
+:mod:`~common.cordis_port.context`    ``Context``：插件门面（服务访问入口）
+:mod:`~common.cordis_port.fiber`      ``Fiber``：插件生命周期与副作用调度
+:mod:`~common.cordis_port.registry`   插件注册表与 ``@Inject`` 依赖声明
+:mod:`~common.cordis_port.reflect`    服务仓库与属性访问路由（依赖注入核心）
+:mod:`~common.cordis_port.events`     事件总线（五种派发模式）
+:mod:`~common.cordis_port.logger`     日志服务与格式化/导出
+:mod:`~common.cordis_port.service`    服务基类
+:mod:`~common.cordis_port.utils`      基础设施（符号、原型链、追踪代理）
 =========================  ================================================
 
 本包同时导出两套命名：Python 风格的 ``snake_case`` 与官方 TS 的 ``camelCase``
@@ -28,7 +28,7 @@ Python 移植，实现了「插件化 + 依赖注入 + 事件总线」的运行�
 
 最简用法::
 
-    from common.cordis import Context
+    from common.cordis_port import Context
 
     ctx = Context()
 
