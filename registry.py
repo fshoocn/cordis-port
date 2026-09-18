@@ -150,7 +150,7 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
 
         class MyPlugin:
             @Inject("database")
-            def run(self, ctx): ...      # 依赖 database，注入后自动调用
+            def run(self): ...           # 依赖 database，注入后自动调用
 
         @Inject("logger", {"level": 3})
         class OtherPlugin:
@@ -159,6 +159,9 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
     参数:
         name: 依赖的服务名。
         config: 可选的依赖配置（合并进拦截层，供服务读取）。
+
+    被装饰方法只接收宿主对象本身；若宿主带有 ``Tracker.property``，
+    注入上下文会通过该属性临时提供（``Service`` 默认是 ``self.ctx``）。
     """
 
     def decorator(value: Any, kind: str | None = None) -> Any:
@@ -167,50 +170,70 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
         if resolved_kind == "class":
             # 类装饰：把依赖合并到 ``inject`` 类属性上，并标记 checkProto
             if not hasattr(value, "inject") or "inject" not in value.__dict__:
-                parent_inject = getattr(value, "inject", None)
                 inherited: dict[str, Any] = {}
-                if isinstance(parent_inject, dict):
-                    inherited.update(parent_inject)
-                else:
-                    # 沿基类查找可继承的 inject（近似 JS 原型的自有属性查找）
-                    for base in getattr(value, "__mro__", ())[1:]:
-                        base_inject = base.__dict__.get("inject")
-                        if isinstance(base_inject, dict):
-                            inherited.update(base_inject)
-                            break
+                for base in reversed(getattr(value, "__mro__", ())[1:]):
+                    base_inject = base.__dict__.get("inject")
+                    if base_inject is not None:
+                        resolve_inject(base_inject, inherited)
                 value.inject = inherited
                 set_symbol(value.inject, symbols.checkProto, True)
+            elif isinstance(value.__dict__["inject"], (list, tuple)):
+                normalized: dict[str, Any] = {}
+                resolve_inject(value.__dict__["inject"], normalized)
+                value.inject = normalized
+                set_symbol(value.inject, symbols.checkProto, True)
+            elif not isinstance(value.__dict__["inject"], dict):
+                raise TypeError("@Inject() requires inject to be a list or dict")
             value.inject[name] = config
             return value
 
         if resolved_kind == "method":
             # 方法装饰：记录元数据 + 追加 init hook
-            metadata = get_symbol(value, symbols.metadata)
+            descriptor_kind: str | None = None
+            method: Callable[..., Any] = value
+            if isinstance(value, staticmethod):
+                descriptor_kind = "static"
+                method = value.__func__
+            elif isinstance(value, classmethod):
+                descriptor_kind = "class"
+                method = value.__func__
+
+            metadata = get_symbol(method, symbols.metadata)
             if metadata is None:
                 metadata = {}
-                set_symbol(value, symbols.metadata, metadata)
+                set_symbol(method, symbols.metadata, metadata)
             inject = metadata.setdefault("inject", {})
             inject[name] = config
 
-            def init_hook(self: Any) -> None:
+            def init_hook(self: Any, descriptor: Any = None) -> None:
                 """实例初始化时注册依赖，并在依赖就绪后调用被装饰的方法。"""
                 tracker = get_symbol(self, symbols.tracker)
                 property_name = getattr(tracker, "property", None) if tracker is not None else None
+                kind = descriptor_kind
+                if isinstance(descriptor, staticmethod):
+                    kind = "static"
+                elif isinstance(descriptor, classmethod):
+                    kind = "class"
 
                 def callback(ctx: Context, config: Any = None) -> Any:
+                    if kind == "static":
+                        return method()
+                    if kind == "class":
+                        return method(self.__class__)
                     # 若 tracker 指明属性名（如 ``ctx``），把 ctx 通过 withProps 注入，
                     # 使方法内可通过该属性访问上下文
                     if property_name:
                         receiver = with_props(self, {property_name: ctx})
-                        return value(self if not hasattr(self, property_name) else receiver)
-                    return value(self)
+                        return method(self if not hasattr(self, property_name) else receiver)
+                    return method(self)
 
                 self.ctx.inject(inject, callback)
 
-            hooks = get_symbol(value, symbols.initHooks)
+            set_symbol(init_hook, symbols.metadata, {"inject_hook": True})
+            hooks = get_symbol(method, symbols.initHooks)
             if hooks is None:
                 hooks = []
-                set_symbol(value, symbols.initHooks, hooks)
+                set_symbol(method, symbols.initHooks, hooks)
             hooks.append(init_hook)
             return value
 

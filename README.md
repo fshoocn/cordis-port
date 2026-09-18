@@ -59,7 +59,7 @@ pip install "git+https://github.com/fshoocn/cordis-port.git"
 
 ```powershell
 # 指定标签
-pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.0"
+pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.1"
 
 # 指定提交
 pip install "git+https://github.com/fshoocn/cordis-port.git@8fbc905"

@@ -863,6 +863,7 @@ class Fiber:
             seen_hooks: set[int] = set()
             for cls in type(instance).__mro__:
                 for member in vars(cls).values():
+                    descriptor = member
                     if isinstance(member, (staticmethod, classmethod)):
                         member = member.__func__
                     method_hooks = get_symbol(member, symbols.initHooks)
@@ -873,7 +874,11 @@ class Fiber:
                         if marker in seen_hooks:
                             continue
                         seen_hooks.add(marker)
-                        hook(instance)
+                        hook_metadata = get_symbol(hook, symbols.metadata, {})
+                        if isinstance(hook_metadata, dict) and hook_metadata.get("inject_hook"):
+                            hook(instance, descriptor)
+                        else:
+                            hook(instance)
             # 最后调用 init（服务类常用：构造完再做初始化）
             init = get_symbol(instance, symbols.init)
             if init is None:

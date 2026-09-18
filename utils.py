@@ -845,6 +845,18 @@ class _PropsProxy:
         object.__setattr__(self, "_props_target", target)
         object.__setattr__(self, "_props_map", props)
 
+    @property
+    def __class__(self) -> type[Any]:
+        """Expose the target class to Python's proxy-aware isinstance check."""
+        return type(object.__getattribute__(self, "_props_target"))
+
+    @property
+    def __dict__(self) -> dict[str, Any]:
+        """Expose the target instance dictionary instead of proxy internals."""
+        target = object.__getattribute__(self, "_props_target")
+        state = getattr(target, "__dict__", None)
+        return state if isinstance(state, dict) else {}
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_props_"):
             raise AttributeError(name)
