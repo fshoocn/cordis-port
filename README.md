@@ -59,7 +59,7 @@ pip install "git+https://github.com/fshoocn/cordis-port.git"
 
 ```powershell
 # 指定标签
-pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.1"
+pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.3"
 
 # 指定提交
 pip install "git+https://github.com/fshoocn/cordis-port.git@8fbc905"
@@ -276,7 +276,8 @@ class C(Service):
 >    在依赖卸载时被调用（上游测试正是用这一点验证生命周期）；
 > 2. 方法调用经「内部子插件」异步加载，相对父插件存在一个延迟；若需等待其执行完毕，
 >    可在加载后 `await asyncio.sleep(0)` 让出一轮事件循环；该子插件出错时，错误记录在
->    内部 Fiber 中，宿主 Fiber 仍可能保持 `ACTIVE`，应同时检查内部 Fiber 状态。
+>    内部 Fiber 中，宿主 Fiber 仍可能保持 `ACTIVE`，应同时检查内部 Fiber 状态；
+>    内部 Fiber 名称会包含 `ctx.inject(依赖)@宿主插件.方法`，便于定位来源。
 > 3. `@Inject` 方法是持续依赖监听，不是只执行一次的初始化器；依赖服务重载时可能再次调用。
 >    有副作用的逻辑应保持幂等，或返回对应的清理函数。
 > 4. `Service` hook 中的 `self` 是用于临时覆盖 `ctx` 的代理。`isinstance()` 和

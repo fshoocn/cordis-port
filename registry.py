@@ -233,6 +233,10 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
                         return method(self if not hasattr(self, property_name) else receiver)
                     return method(self)
 
+                callback.__name__ = (
+                    f"ctx.inject({','.join(inject)})@{self.ctx.fiber.name}."
+                    f"{getattr(method, '__name__', 'hook')}"
+                )
                 self.ctx.inject(inject, callback)
 
             set_symbol(init_hook, symbols.metadata, {"inject_hook": True})
