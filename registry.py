@@ -162,6 +162,9 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
 
     被装饰方法只接收宿主对象本身；若宿主带有 ``Tracker.property``，
     注入上下文会通过该属性临时提供（``Service`` 默认是 ``self.ctx``）。
+    方法 hook 由插件 Fiber 扫描；直接手动构造的服务实例不会触发扫描。
+    注入回调通过内部 ``ctx.inject`` Fiber 运行，因此其错误和重载状态遵循
+    ``ctx.inject`` 的官方生命周期语义。
     """
 
     def decorator(value: Any, kind: str | None = None) -> Any:
@@ -205,6 +208,9 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
             inject = metadata.setdefault("inject", {})
             inject[name] = config
 
+            if metadata.get("init_hook") is not None:
+                return value
+
             def init_hook(self: Any, descriptor: Any = None) -> None:
                 """实例初始化时注册依赖，并在依赖就绪后调用被装饰的方法。"""
                 tracker = get_symbol(self, symbols.tracker)
@@ -230,6 +236,7 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
                 self.ctx.inject(inject, callback)
 
             set_symbol(init_hook, symbols.metadata, {"inject_hook": True})
+            metadata["init_hook"] = init_hook
             hooks = get_symbol(method, symbols.initHooks)
             if hooks is None:
                 hooks = []

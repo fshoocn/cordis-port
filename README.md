@@ -264,6 +264,8 @@ class C(Service):
 > `Service` 基类会自动安装 `Tracker(property="ctx", associate=服务名)`，因此**推荐用于
 > `Service` 子类**（上游 `packages/core/tests/decorator.spec.ts` 也正是这样测试的）：
 > 方法体内的 `self.ctx` 会被替换为「声明了该依赖的子插件上下文」，从而可以直接访问依赖。
+> 只有通过 `ctx.plugin(ServiceClass)` 加载的服务类会进入插件 Fiber 的 hook 扫描；
+> 在其他插件中直接执行 `ServiceClass(ctx)` 不会自动扫描并执行其 `@Inject` 方法。
 >
 > 普通插件类没有 Tracker，`property` 为空，此时方法虽仍会在依赖就绪后被调用，
 > 但 `self.ctx` 不会被替换（与上游 `property ? withProps(this, ...) : this` 的分支一致）。
@@ -273,7 +275,13 @@ class C(Service):
 > 1. 被装饰方法的**返回值会被当作 effect 处理** —— 返回可调用对象即注册为清理函数，
 >    在依赖卸载时被调用（上游测试正是用这一点验证生命周期）；
 > 2. 方法调用经「内部子插件」异步加载，相对父插件存在一个延迟；若需等待其执行完毕，
->    可在加载后 `await asyncio.sleep(0)` 让出一轮事件循环。
+>    可在加载后 `await asyncio.sleep(0)` 让出一轮事件循环；该子插件出错时，错误记录在
+>    内部 Fiber 中，宿主 Fiber 仍可能保持 `ACTIVE`，应同时检查内部 Fiber 状态。
+> 3. `@Inject` 方法是持续依赖监听，不是只执行一次的初始化器；依赖服务重载时可能再次调用。
+>    有副作用的逻辑应保持幂等，或返回对应的清理函数。
+> 4. `Service` hook 中的 `self` 是用于临时覆盖 `ctx` 的代理。`isinstance()` 和
+>    `self.__class__` 可用，但 `type(self) is SomeClass`、`self is original`、`id(self)`
+>    不应作为身份判断；也不要长期保存该代理用于序列化或 pickle。
 
 ### 4. 事件
 
