@@ -1,5 +1,6 @@
 # cordis-port
 
+[![PyPI](https://img.shields.io/pypi/v/cordis-port.svg)](https://pypi.org/project/cordis-port/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#安装)
@@ -40,9 +41,15 @@
 
 ## 安装
 
-### 在线安装（推荐）
+### 在线安装
 
-**方式一：从 GitHub 直接安装**（无需等待发布，始终取最新代码）
+**方式一：从 PyPI 安装（推荐）**
+
+```powershell
+pip install cordis-port
+```
+
+**方式二：从 GitHub 直接安装**（始终取最新代码）
 
 ```powershell
 pip install "git+https://github.com/fshoocn/cordis-port.git"
@@ -58,26 +65,11 @@ pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.0"
 pip install "git+https://github.com/fshoocn/cordis-port.git@8fbc905"
 ```
 
-**方式二：从 PyPI 安装**（发布后可用）
-
-```powershell
-pip install cordis-port
-```
-
 两种方式导入名都是 `cordis_port`：
 
 ```python
 from cordis_port import Context
 ```
-
-> **安装方式对比**
->
-> | | `git+https://...` | `pip install cordis-port` |
-> | --- | --- | --- |
-> | 可用时机 | 现在即可 | 首次发布到 PyPI 后 |
-> | 版本 | 跟踪 `main` 最新代码 | 已发布的稳定版本 |
-> | 依赖构建工具 | 需要 `git`（pip 会自动处理） | 不需要 |
-> | 适用场景 | 开发试用、CI 中锁定提交 | 生产环境、正式依赖 |
 
 ### 本地安装
 
@@ -591,44 +583,8 @@ cd ..; python -c "import cordis_port; print(len(cordis_port.__all__), 'exports')
 > 本项目发布名为 **`cordis-port`**，导入名为 **`cordis_port`**（连字符不能作导入名，
 > 下划线是 Python 打包的标准映射）。
 >
-> 之所以叫 `cordis-port` 而不叫更短的 `cordis-py`：PyPI 上已有 `py-cordis`、
-> `cordis-python`、`python-cordis`、`cordispy`、`cordis` 等多个 cordis 相关包，
-> 命名过于相似会造成混淆。`cordis-port` 与它们都有足够区分度。
->
 > 导入名与上游 TS 包名（`cordis`）不同，但**类名、方法名、服务名均保持一致**，
 > 对照上游文档时只需注意导入路径的差异。
-
-### 首次配置（仅需一次）
-
-**1. 注册 PyPI 账号并开启 2FA**
-
-访问 [pypi.org/account/register](https://pypi.org/account/register/) 注册，
-然后在 `Account settings → Two-factor authentication` 开启 2FA（PyPI 强制要求）。
-
-**2. 添加 Trusted Publisher（可信发布者）**
-
-项目尚未发布时，需要添加「待发布者」，让 PyPI 预先信任本仓库的工作流：
-
-1. 登录 PyPI，进入 <https://pypi.org/manage/account/publishing/>
-2. 页面底部 **Add a new pending publisher** 表单中填写：
-
-   | 字段 | 填写值 |
-   | --- | --- |
-   | PyPI Project Name | `cordis-port` |
-   | Owner | `fshoocn` |
-   | Repository name | `cordis-port` |
-   | Workflow name | `publish.yml` |
-   | Environment name | `pypi` |
-
-3. 点击 **Add** 保存
-
-> 该表单的五个字段必须与 `pyproject.toml` 的 `name` 和 `publish.yml` 中的配置**完全一致**，
-> 否则发布时会认证失败。
-
-**3. 在 GitHub 创建 environment**
-
-进入 `Settings → Environments → New environment`，名称填 `pypi`（与上表一致）。
-无需添加任何 secret —— 认证通过 OIDC 令牌自动完成。
 
 ### 发布新版本
 
@@ -649,11 +605,3 @@ git push origin main --tags
 
 在 Actions 页面手动运行 `Publish` 工作流只会**构建并上传产物**，不会发布到 PyPI
 （`publish` 任务仅在推送标签时执行），可用于验证构建是否正常。
-
-### 无法发布时的备选方案
-
-若暂时不想发布到 PyPI，`git+` 安装方式已完整可用：
-
-```powershell
-pip install "git+https://github.com/fshoocn/cordis-port.git"
-```
