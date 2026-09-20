@@ -599,17 +599,18 @@ class _TraceableProxy:
         object.__setattr__(self, "_trace_tracker", tracker)
         object.__setattr__(self, "_trace_ctx", ctx)
 
-    @property
-    def __class__(self) -> type[Any]:
-        """Expose the wrapped class to Python's proxy-aware isinstance check."""
-        return type(object.__getattribute__(self, "_trace_value"))
-
-    @property
-    def __dict__(self) -> dict[str, Any]:
-        """Expose the wrapped instance dictionary instead of proxy internals."""
-        target = object.__getattribute__(self, "_trace_value")
-        state = getattr(target, "__dict__", None)
-        return state if isinstance(state, dict) else {}
+    def __getattribute__(self, name: str) -> Any:
+        if name in ("__class__", "__dict__"):
+            try:
+                target = object.__getattribute__(self, "_trace_value")
+            except AttributeError:
+                return object.__getattribute__(self, name)
+            if name == "__class__":
+                target_class = getattr(target, "__class__", None)
+                return target_class if isinstance(target_class, type) else type(target)
+            state = getattr(target, "__dict__", None)
+            return state if isinstance(state, dict) else {}
+        return object.__getattribute__(self, name)
 
     @property
     def _def_site(self) -> Any:
@@ -807,7 +808,7 @@ def create_shadow_method(
     return shadow_method
 
 
-def get_traceable(ctx: Any, value: ValueT) -> ValueT:
+def get_traceable[ValueT](ctx: Any, value: ValueT) -> ValueT:
     """把一个值按需包装成追踪代理；标量与无 tracker 的值原样返回。"""
     if not is_object(value):
         return value
@@ -840,7 +841,7 @@ def _has_own_symbol(value: Any, symbol: _Symbol) -> bool:
     return _symbol_attr(symbol) in vars(type(value))
 
 
-def create_traceable(ctx: Any, value: ValueT, tracker: Tracker) -> ValueT:
+def create_traceable[ValueT](ctx: Any, value: ValueT, tracker: Tracker) -> ValueT:
     """创建追踪代理（对应官方 ``createTraceable``）。"""
     return cast(ValueT, _TraceableProxy(ctx, value, tracker))
 
@@ -857,19 +858,18 @@ class _PropsProxy:
         object.__setattr__(self, "_props_target", target)
         object.__setattr__(self, "_props_map", props)
 
-    @property
-    def __class__(self) -> type[Any]:
-        """Expose the target-reported class to nested proxy checks."""
-        target = object.__getattribute__(self, "_props_target")
-        target_class = getattr(target, "__class__", None)
-        return target_class if isinstance(target_class, type) else type(target)
-
-    @property
-    def __dict__(self) -> dict[str, Any]:
-        """Expose the target instance dictionary instead of proxy internals."""
-        target = object.__getattribute__(self, "_props_target")
-        state = getattr(target, "__dict__", None)
-        return state if isinstance(state, dict) else {}
+    def __getattribute__(self, name: str) -> Any:
+        if name in ("__class__", "__dict__"):
+            try:
+                target = object.__getattribute__(self, "_props_target")
+            except AttributeError:
+                return object.__getattribute__(self, name)
+            if name == "__class__":
+                target_class = getattr(target, "__class__", None)
+                return target_class if isinstance(target_class, type) else type(target)
+            state = getattr(target, "__dict__", None)
+            return state if isinstance(state, dict) else {}
+        return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_props_"):
@@ -1047,7 +1047,7 @@ def _handle_error(
     raise reason
 
 
-def compose_error(
+def compose_error[ResultT](
     callback: Callable[[StackInfo], ResultT],
     get_outer_stack: Callable[[], list[str]] | None = None,
 ) -> ResultT:
