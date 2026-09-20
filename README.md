@@ -59,7 +59,7 @@ pip install "git+https://github.com/fshoocn/cordis-port.git"
 
 ```powershell
 # 指定标签
-pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.3"
+pip install "git+https://github.com/fshoocn/cordis-port.git@v0.1.4"
 
 # 指定提交
 pip install "git+https://github.com/fshoocn/cordis-port.git@8fbc905"
@@ -280,9 +280,9 @@ class C(Service):
 >    内部 Fiber 名称会包含 `ctx.inject(依赖)@宿主插件.方法`，便于定位来源。
 > 3. `@Inject` 方法是持续依赖监听，不是只执行一次的初始化器；依赖服务重载时可能再次调用。
 >    有副作用的逻辑应保持幂等，或返回对应的清理函数。
-> 4. `Service` hook 中的 `self` 是用于临时覆盖 `ctx` 的代理。`isinstance()` 和
->    `self.__class__` 可用，但 `type(self) is SomeClass`、`self is original`、`id(self)`
->    不应作为身份判断；也不要长期保存该代理用于序列化或 pickle。
+> 4. `Service` hook 和服务方法中的 `self` 都可能是用于临时追踪的代理。
+>    `isinstance()`、`self.__class__` 和 `self.__dict__` 可用，但 `type(self) is SomeClass`、
+>    `self is original`、`id(self)` 不应作为身份判断；也不要长期保存该代理用于序列化或 pickle。
 
 ### 4. 事件
 

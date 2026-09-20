@@ -600,6 +600,18 @@ class _TraceableProxy:
         object.__setattr__(self, "_trace_ctx", ctx)
 
     @property
+    def __class__(self) -> type[Any]:
+        """Expose the wrapped class to Python's proxy-aware isinstance check."""
+        return type(object.__getattribute__(self, "_trace_value"))
+
+    @property
+    def __dict__(self) -> dict[str, Any]:
+        """Expose the wrapped instance dictionary instead of proxy internals."""
+        target = object.__getattribute__(self, "_trace_value")
+        state = getattr(target, "__dict__", None)
+        return state if isinstance(state, dict) else {}
+
+    @property
     def _def_site(self) -> Any:
         """定义点：优先取 ``symbols.shadow``（明确标记的定义上下文）。"""
         shadow = get_symbol(self, symbols.shadow)
@@ -847,8 +859,10 @@ class _PropsProxy:
 
     @property
     def __class__(self) -> type[Any]:
-        """Expose the target class to Python's proxy-aware isinstance check."""
-        return type(object.__getattribute__(self, "_props_target"))
+        """Expose the target-reported class to nested proxy checks."""
+        target = object.__getattribute__(self, "_props_target")
+        target_class = getattr(target, "__class__", None)
+        return target_class if isinstance(target_class, type) else type(target)
 
     @property
     def __dict__(self) -> dict[str, Any]:
