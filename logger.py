@@ -337,6 +337,10 @@ class Logger:
         """记录警告级日志。"""
         self._method("warn", LoggerLevel.WARN)(*args)
 
+    def warning(self, *args: Any) -> None:
+        """记录警告级日志（``warn`` 的别名，对齐 stdlib ``logging.warning`` 命名）。"""
+        self.warn(*args)
+
     def info(self, *args: Any) -> None:
         """记录信息级日志。"""
         self._method("info", LoggerLevel.INFO)(*args)
@@ -498,6 +502,10 @@ class LoggerService:
 
     def warn(self, *args: Any) -> None:
         """``ctx.logger.warn(...)``：直接用默认日志名记录警告。"""
+        self().warn(*args)
+
+    def warning(self, *args: Any) -> None:
+        """``ctx.logger.warning(...)``：``warn`` 的别名（对齐 stdlib 命名）。"""
         self().warn(*args)
 
     def info(self, *args: Any) -> None:
