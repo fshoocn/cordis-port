@@ -25,6 +25,9 @@ Supports the five dispatch modes (``emit``, ``parallel``, ``serial``, ``bail``,
 * **过滤协议**：``thisArg[Context.filter]`` 返回假值时，跳过不在同一隔离层的监听器；
 * **内部钩子**：``internal/*`` 事件用于框架自身扩展，例如 ``internal/dispatch``
   在每次派发前触发，``internal/listener`` 可截获注册行为（fiber 私有钩子即由此实现）。
+  另有三个配置生命周期事件：``internal/config``（解析配置，含 Schema 校验）、
+  ``internal/update``（更新配置，钩子可否决重启）与 ``internal/commit``
+  （提交原始配置，供持久化监听）。
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
+from .fiber import resolve_config
 from .utils import DisposableList, Tracker, _Symbol, get_symbol, set_symbol, symbols
 
 if TYPE_CHECKING:
@@ -131,15 +135,18 @@ class EventsService:
 
     # -- constructor hooks —— 构造期安装的内部钩子 ---------------------------
     def _install_internal_hooks(self) -> None:
-        """Port of the two ``this.on(...)`` calls in the official constructor.
+        """Port of the three ``this.on(...)`` calls in the official constructor.
 
-        安装两个内部监听器：
+        安装三个内部监听器：
 
         1. ``internal/listener``（普通监听）—— 当注册的事件是 ``internal/update``
            且未标记 ``global_`` 时，把监听器收进 ``fiber._hooks``（fiber 私有钩子），
-           而不是进全局 ``_hooks``，从而避免影响其他插件；
+           并注册成 fiber effect 随 fiber 卸载自动注销，避免跨重载累积；
         2. ``internal/update``（前置、全局）—— 依次执行每个 fiber 的私有
-           ``internal/update`` 钩子，全部走完才调用 ``next_hook``（默认更新逻辑）。
+           ``internal/update`` 钩子，全部走完才调用 ``next_hook``（默认更新逻辑）；
+           钩子收到的 ``config`` 是「生效配置」（已经过 ``internal/config`` 解析）；
+        3. ``internal/config``（普通监听）—— 解析配置的默认实现：把瀑布链末端的
+           原始配置交给 :func:`~fiber.resolve_config` 做 Schema 校验与转换。
         """
 
         def on_listener(
@@ -150,36 +157,47 @@ class EventsService:
         ) -> Any:
             """``internal/listener``: private ``internal/update`` hooks.
 
-            把 ``internal/update`` 的注册改为「挂到目标 fiber 私有钩子表」，
-            返回注销函数；其它事件返回 ``None`` 表示不拦截。
+            把 ``internal/update`` 的注册改为「挂到目标 fiber 私有钩子表」，并以
+            fiber effect 绑定生命周期（fiber 卸载即注销，可显式调用返回的销毁
+            函数提前注销）；其它事件返回 ``None`` 表示不拦截。
             """
             if name == "internal/update" and not options.global_:
                 hooks = target.fiber._hooks.setdefault("internal/update", DisposableList())
-                if options.prepend:
-                    return hooks.unshift(listener)
-                return hooks.push(listener)
+                add = hooks.unshift if options.prepend else hooks.push
+                return target.fiber.effect(lambda: add(listener), 'ctx.on("internal/update")')
             return None
 
         def on_update(
             target: Fiber,
             config: Any,
-            no_save: bool,
             next_hook: Callable[..., Any],
         ) -> Any:
             """``internal/update``: run every private hook, then ``next``.
 
             把 fiber 私有钩子串成责任链：每个钩子都能选择先做自己的事再调 ``next``，
-            或用 ``next`` 跳过后续逻辑（支持带参覆盖配置的钩子覆盖）。
+            或直接返回（不调 ``next``）以否决默认更新逻辑。
             """
             cbs = list(target._hooks.get("internal/update", []))
 
             def _next() -> Any:
                 callback = cbs.pop(0) if cbs else next_hook
-                return callback(config, no_save, _next)
+                return callback(config, _next)
 
             return _next()
 
-        # 标记这两个回调需要 ``thisArg`` 作为第一个参数（官方 ``this`` 语义）
+        def on_config(
+            fiber: Fiber,
+            next_hook: Callable[..., Any],
+        ) -> Any:
+            """``internal/config``: resolve the config through the schema.
+
+            瀑布链末端的默认解析器：把 ``next_hook()`` 得到的原始配置交给
+            :func:`~fiber.resolve_config` 做 Schema 校验与转换。插件可注册
+            ``internal/config`` 监听器，在解析前改写配置。
+            """
+            return resolve_config(fiber.runtime, next_hook())
+
+        # 标记前两个回调需要 ``thisArg`` 作为第一个参数（官方 ``this`` 语义）
         on_listener._cordis_uses_this_arg = True  # type: ignore[attr-defined]
         on_update._cordis_uses_this_arg = True  # type: ignore[attr-defined]
 
@@ -188,6 +206,9 @@ class EventsService:
         )
         self._hooks.setdefault("internal/update", []).insert(
             0, Hook(ctx=self.ctx, callback=on_update, prepend=True, global_=True)
+        )
+        self._hooks.setdefault("internal/config", []).append(
+            Hook(ctx=self.ctx, callback=on_config)
         )
 
     # -- resolution —— 监听器解析 --------------------------------------------
@@ -236,7 +257,7 @@ class EventsService:
         :class:`EventDispatchError`（``errors`` 保留原始异常列表）。
         """
         pending = list(args)
-        this_arg, callbacks = self._resolve("emit", pending)
+        this_arg, callbacks = self._resolve("parallel", pending)
         results = await asyncio.gather(
             *(_invoke(callback, this_arg, pending) for callback in callbacks),
             return_exceptions=True,

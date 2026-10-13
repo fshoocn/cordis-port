@@ -28,14 +28,26 @@
 | 上游仓库 | [cordiverse/cordis](https://github.com/cordiverse/cordis) |
 | 目标包 | `packages/core`（npm 包名 `cordis`） |
 | 分支 | `main` |
-| 提交 | [`f8ea3cd50f1a5724e8e715995bcde131c9c12b2c`](https://github.com/cordiverse/cordis/commit/f8ea3cd50f1a5724e8e715995bcde131c9c12b2c)（短号 `f8ea3cd`） |
-| 提交时间 | 2026-09-08 23:39:20 +0800 |
-| 提交说明 | `chore: bump versions` |
+| 提交 | [`c261dd2c13d65b1994adb1cdc10d7dba61542523`](https://github.com/cordiverse/cordis/commit/c261dd2c13d65b1994adb1cdc10d7dba61542523)（短号 `c261dd2`） |
+| 提交时间 | 2026-10-10 15:43:31 +0800 |
+| 提交说明 | `fix(core): track reload revisions in fiber epochs (#189)` |
 | 上游版本号 | `4.0.0-rc.10` |
-| 文档更新时间 | 2026-09-17 |
+| 文档更新时间 | 2026-10-13 |
 
-> 移植基线已逐文件校验：本地 `packages/core/src/*.ts` 参考副本与该提交的 9 个源文件
-> 逐字节一致（SHA-256 完全匹配）。
+> 移植基线已逐文件校验：`packages/core/src` 的 9 个源文件按提交 SHA 从上游取回
+> 核对，自上一基线 `f8ea3cd` 起仅 `events.ts` 与 `fiber.ts` 发生变化。
+
+**同步记录** —— 2026-10-13 · `f8ea3cd` → `c261dd2`（12 次上游提交，触及
+`packages/core` 的 4 次）：
+
+| 提交 | 说明 |
+| --- | --- |
+| [`1431598`](https://github.com/cordiverse/cordis/commit/143159831b23ee614523eabc007237829d9223c5) | `feat(core): resolve plugin config on every reload (#134)` |
+| [`9f5e690`](https://github.com/cordiverse/cordis/commit/9f5e69062995a939f5c76b8d503a4421b80a0bf3) | `fix(core): report parallel dispatch mode (#136)` |
+| [`7d0a90d`](https://github.com/cordiverse/cordis/commit/7d0a90dde2cc4ed6d3c1c6294e8f4fd758eb02c4) | `fix(core): dispose internal/update hooks with the fiber (#56)` |
+| [`c261dd2`](https://github.com/cordiverse/cordis/commit/c261dd2c13d65b1994adb1cdc10d7dba61542523) | `fix(core): track reload revisions in fiber epochs (#189)` |
+
+其余 8 次为 hmr / loader / create / include / timer 等包的修复，不在移植范围。
 
 ---
 
@@ -347,7 +359,8 @@ svc.load()        # "fast"
 
 ### 6. 配置校验
 
-给插件类声明 `Config`（标准 Schema，需实现 `validate`），加载时自动校验：
+给插件类声明 `Config`（标准 Schema，需实现 `validate`），每次加载（含重载与
+`update()`）都会自动校验并转换：
 
 ```python
 class Schema:
@@ -369,11 +382,16 @@ class Server:
 
 fiber = ctx.plugin(Server, {"port": "8080"})
 await fiber
-print(fiber.config)                     # {'port': 8080}（已转换）
+print(fiber.config)                     # {'port': '8080'}（保留原始配置）
 ```
 
+`fiber.config` 始终保留**原始配置**；校验转换后的**生效配置**传给插件
+（`Server.__init__` 的 `config` 参数，即 `{'port': 8080}`），`internal/update`
+监听器收到的也是生效配置。
+
 校验失败时：`await fiber` 抛出 `ValidationError`，fiber 进入 `FAILED`，
-可用 `update()` 修正后自动恢复：
+可用 `update()` 修正后自动恢复。`update()` 收到非法配置时会**同步**抛出
+`ValidationError`，插件保持原配置继续运行：
 
 ```python
 bad = ctx.plugin(Server, {"port": "x"})

@@ -15,7 +15,8 @@ completion synchronously so callers can keep using the plain API.
 2. **管理副作用（effect）**：插件里创建的监听器、定时器、服务都登记为 effect，
    随 fiber 卸载而自动清理，避免资源泄漏。
 3. **响应依赖变化**：通过「epoch（纪元字符串）」比对，依赖就绪时加载（reload），
-   依赖失效时卸载（unload），并在两者间自动流转。
+   依赖失效时卸载（unload），并在两者间自动流转；epoch 由「修订号 + 依赖
+   提供者」组成，``restart()`` 即递增修订号强制重载一次。
 4. **错误隔离**：插件抛异常时记录到 ``_error`` 并保持非激活，等待 ``update()``
    重置后重试。
 
@@ -137,14 +138,14 @@ class EffectRunner[T]:
     """Port of TS ``interface EffectRunner``.
 
     Drives ``Fiber._execute``.  ``epoch`` is ``bool`` for effects (armed latch)
-    and ``str`` for fibers (dependency epoch string).
+    and ``str`` for fibers (lifecycle epoch string).
 
     副作用驱动器：``_execute`` 通过它拿到「要执行什么」与「把销毁函数交给谁」。
 
     字段:
         execute: 返回副作用的函数（插件提供的逻辑）。
-        epoch: fiber 用字符串表示「依赖纪元」；effect 用布尔表示「是否已解除」
-            （``True`` 表示尚未销毁，可防重复销毁）。
+        epoch: fiber 用字符串表示「生命周期纪元」（修订号 + 各依赖提供者 uid）；
+            effect 用布尔表示「是否已解除」（``True`` 表示尚未销毁，可防重复销毁）。
         collect: 收集销毁函数的回调。
         get_outer_stack: 长栈信息提供者（出错时附加调用方栈）。
     """
@@ -204,16 +205,19 @@ class EffectMeta:
 INACTIVE = "__INACTIVE__"
 
 
-def resolve_config(runtime: Runtime, config: Any) -> Any:
+def resolve_config(runtime: Runtime | None, config: Any) -> Any:
     """Port of TS ``resolveConfig``: validate through the standard schema.
 
     用插件声明的 ``Config``（标准 Schema）校验并转换配置：
 
+    * ``runtime`` 为 ``None``（根 fiber）→ 原样返回；
     * 未声明 Schema → 原样返回；
     * 校验通过 → 返回转换后的值（支持返回对象或 ``{"value": ...}`` 字典两种形式）；
     * 校验失败 → 抛 :class:`ValidationError`；
     * 异步校验 → 直接报错（本移植不支持异步 Schema）。
     """
+    if runtime is None:
+        return config
     schema = runtime.Config
     if schema is None:
         return config
@@ -261,6 +265,7 @@ class Fiber:
     _disposables: DisposableList[Disposable[Any]]
     _store: dict[str, Impl]
     _error: BaseException | None
+    _revision: int
     _runner: EffectRunner[str]
 
     def __init__(
@@ -294,6 +299,7 @@ class Fiber:
         self._disposables = DisposableList[Disposable[Any]]()
         self._store: dict[str, Impl] = {}
         self._error: BaseException | None = None
+        self._revision = 0
         self._runner: EffectRunner[str]
         self._get_outer_stack = get_outer_stack or build_outer_stack()
         # no_shadow：fiber 自身不做定义点追踪
@@ -309,7 +315,8 @@ class Fiber:
             self.ctx = self.context = parent
             self.store = {}
             self.state = FiberState.ACTIVE
-            self._runner = EffectRunner(lambda: None, "", collect, self._get_outer_stack)
+            # 根 fiber 的初始纪元与修订号初值一致（"0"），restart() 递增修订号即重载
+            self._runner = EffectRunner(lambda: None, "0", collect, self._get_outer_stack)
             self.dispose = self._root_dispose  # type: ignore[method-assign]
             return
 
@@ -347,9 +354,9 @@ class Fiber:
         注册插件并返回注销逻辑：
 
         1. 把自身加入 ``runtime.fibers``；
-        2. 校验配置（失败则记日志、置 ``_error``，不抛出以免中断其他插件）；
-        3. 计算依赖纪元并触发加载；
-        4. 返回的 ``dispose`` 负责反向操作：置空 ``uid``、广播事件、从
+        2. 计算依赖纪元并触发加载（配置校验移至执行时进行，见 :meth:`_resolve`，
+           校验失败由 :meth:`_reload` 记录并置 ``_error``）；
+        3. 返回的 ``dispose`` 负责反向操作：置空 ``uid``、广播事件、从
            runtime 删除（末个 fiber 时连 runtime 一起删）、进入非激活并等待
            正在进行的加载/卸载结束。
         """
@@ -359,10 +366,9 @@ class Fiber:
         remove = runtime.fibers.push(self)
 
         try:
-            self.config = resolve_config(runtime, self.config)
             self._refresh()
         except BaseException as error:  # noqa: BLE001
-            # 配置非法：记录错误并保持非激活，等待 update() 修正
+            # 出错：记录并保持非激活，等待 update() 修正
             self.ctx.logger.error(error)
             self._error = error
 
@@ -402,6 +408,17 @@ class Fiber:
         if self.uid is not None:
             return
         raise CordisError("INACTIVE_EFFECT")
+
+    def _resolve(self, config: Any) -> Any:
+        """Port of ``_resolve``: resolve config through ``internal/config``.
+
+        通过 ``internal/config`` 瀑布事件解析配置。默认监听器（见
+        :mod:`events` 模块）调用 :func:`resolve_config`，用插件声明的 Schema
+        校验并转换；插件可注册同名事件拦截或改写解析过程（例如注入默认值）。
+
+        每次执行插件前都会重新解析，因此 Schema 变更或动态配置在重载后立即生效。
+        """
+        return self.context.waterfall("internal/config", self, lambda: config)
 
     # -- effect engine —— 副作用引擎 -----------------------------------------
     def _execute(self, runner: EffectRunner[Any]) -> Any:
@@ -647,14 +664,14 @@ class Fiber:
         self._store[name] = impl
 
     def _refresh(self) -> None:
-        """Port of ``_refresh``: recompute the dependency epoch.
+        """Port of ``_refresh``: recompute the lifecycle epoch.
 
-        重算依赖纪元：把每个依赖的「提供者 fiber uid」拼成字符串，任何依赖缺失
-        或提供者已销毁则纪元为 :data:`INACTIVE`。纪元变化是触发加载/卸载的唯一依据。
+        重算生命周期纪元：以修订号 ``_revision`` 打头，后接每个依赖的「提供者
+        fiber uid」；任何依赖缺失或提供者已销毁则纪元为 :data:`INACTIVE`。
+        纪元变化是触发加载/卸载的唯一依据。根 fiber 同样适用——``restart()``
+        正是靠递增修订号让纪元必然变化。
         """
-        if self.runtime is None:
-            return
-        epoch = ""
+        epoch = f"{self._revision}"
         for name in self.inject:
             impl = self._store.get(name)
             if impl is None or impl.fiber.uid is None:
@@ -711,17 +728,23 @@ class Fiber:
 
         加载插件：先给依赖方一份 ``_store`` 快照（``store``），再执行插件本体；
         失败则记录错误并把纪元置为 :data:`INACTIVE`（保持非激活，等待修复）。
+        若等待期间纪元已经变化（出现了更新的目标），则跳过执行直接转卸载，
+        保证「只加载最新配置」；此时旧加载即便失败也不再写入 ``_error``。
         结束时根据纪元是否变化决定「稳定下来」还是立即转入卸载。
         """
         self.store = dict(self._store)
         old_epoch = self._runner.epoch
         try:
             await asyncio.sleep(0)
-            await _maybe_await(self._execute(self._runner))
+            if self._runner.epoch == old_epoch:
+                await _maybe_await(self._execute(self._runner))
         except BaseException as reason:  # noqa: BLE001
             self.ctx.logger.error(reason)
-            self._error = reason
-            self._runner.epoch = INACTIVE
+            # A superseded load still needs cleanup, but cannot fail the new
+            # target. 已被新纪元取代的加载仍需清理，但不能让新目标判失败。
+            if self._runner.epoch == old_epoch:
+                self._error = reason
+                self._runner.epoch = INACTIVE
 
         def finish() -> FiberState | None:
             if self._runner.epoch == old_epoch:
@@ -779,61 +802,77 @@ class Fiber:
     async def restart(self) -> None:
         """Port of ``restart``：强制卸载后重新加载当前插件。
 
-        实现方式是把纪元直接置为 :data:`INACTIVE`（触发卸载），再 ``_refresh()``
-        重算纪元（触发加载），最后等待稳定。
+        实现方式是递增修订号 ``_revision`` 再 ``_refresh()`` 重算纪元：纪元必然
+        变化，于是先卸载旧实例、再以当前配置重新加载，最后等待稳定。即使配置
+        不变也保证重新加载一次。
         """
         fiber = self.ctx.fiber
         fiber.assert_active()
-        fiber._set_epoch(INACTIVE)
+        fiber._revision += 1
         fiber._refresh()
         await fiber.wait()
 
     def update(self, config: Any, no_save: bool = False) -> Any:
         """Port of ``update``.
 
-        更新插件配置并重新加载。走 ``internal/update`` 瀑布事件，使 fiber 私有
-        钩子可以拦截/改写更新过程（``default`` 是默认实现：写入配置、清空错误、
-        重启）。
+        更新插件配置并重新加载：
+
+        1. 已加载时先经 ``internal/config`` 瀑布解析出「生效配置」（校验失败会
+           同步抛出 :class:`ValidationError`，且不改动 ``fiber.config``）；
+        2. ``no_save=False`` 时广播 ``internal/commit``（携带原始配置，供持久化）；
+        3. 写入原始配置并清空错误，再走 ``internal/update`` 瀑布事件——fiber
+           私有钩子收到的是「生效配置」，可拦截/改写更新过程；钩子不调用
+           ``next`` 即表示否决重启；
+        4. 未加载（依赖未就绪）时跳过解析与瀑布，直接重启，待依赖就绪后以
+           最新配置加载。
 
         参数:
-            config: 新配置（有 Schema 时先校验）。
-            no_save: 是否跳过持久化（框架层语义，本移植只透传）。
+            config: 新配置（保留原始形态；每次加载时都会重新解析）。
+            no_save: 为 ``True`` 时跳过 ``internal/commit`` 广播（不通知持久化）。
 
-        返回 ``None``（更新被钩子短路）或可等待对象（异步更新任务）。
+        返回 ``None``（更新被钩子否决）或可等待对象（异步更新任务；失败已由
+        fiber 自行上报，但 ``await`` 仍会抛出该错误）。
         """
         fiber = self.ctx.fiber
         fiber.assert_active()
-        if fiber.runtime is not None:
-            config = resolve_config(fiber.runtime, config)
+        loaded = fiber._runner.epoch != INACTIVE
+        resolved = fiber._resolve(config) if loaded else None
+        if not no_save:
+            fiber.context.events.emit("internal/commit", fiber, config)
+        fiber.config = config
+        # 清空错误，让 _set_epoch 允许重新加载（FAILED 状态只能由此恢复）
+        fiber._error = None
 
-        def default() -> Any:
-            fiber.config = config
-            # 清空错误，让 _set_epoch 允许重新加载（FAILED 状态只能由此恢复）
-            fiber._error = None
+        def restart() -> Any:
             return fiber.restart()
 
-        result = fiber.context.waterfall(fiber, "internal/update", config, no_save, default)
+        # a listener may veto the restart, in which case there is nothing to
+        # await 监听器可以否决重启，此时没有可等待的对象
+        result = (
+            fiber.context.waterfall(fiber, "internal/update", resolved, restart)
+            if loaded
+            else restart()
+        )
         if result is None:
             return None
         if _is_thenable(result):
-            # 异步更新：附带错误日志后返回任务
-            response = result
-
-            async def _observe() -> Any:
-                try:
-                    return await response
-                except BaseException as error:
-                    fiber.ctx.logger.error(error)
-                    raise
-
-            return _spawn(_observe())
-        return result
+            task = _spawn(result)
+            # the failure is already reported by the fiber, so mark it handled
+            # here: a caller that drops the result cannot turn it into an
+            # unhandled failure, while `await update()` still observes it
+            # 失败已由 fiber 自行上报，这里标记「已观察」：丢弃返回值的调用方
+            # 不会看到未处理异常，而 ``await update()`` 仍能观察到失败
+            if isinstance(task, asyncio.Task):
+                task.add_done_callback(_consume_failure)
+            return task
+        return _Completed(result)
 
     # -- plugin callback —— 插件回调执行 -------------------------------------
     def _run_plugin(self) -> Any:
         """Port of ``runner.execute`` inside the constructor.
 
-        执行插件本体，两种形态：
+        执行插件本体。先经 :meth:`_resolve` 得到「生效配置」（含 Schema 校验
+        与转换），再按两种形态执行：
 
         * **类插件**：以 ``callback(ctx, config)`` 实例化，随后依次执行
           ``symbols.initHooks``（``@Inject`` 装饰器注册的钩子，以及从类方法上收集
@@ -845,9 +884,10 @@ class Fiber:
         """
         if self.runtime is None:
             return None
+        config = self._resolve(self.config)
         callback = self.runtime.callback
         if is_constructor(callback):
-            instance = callback(self.ctx, self.config)
+            instance = callback(self.ctx, config)
             # 实例自带的 initHooks（例如构造过程中收集的）
             hooks = get_symbol(instance, symbols.initHooks)
             if hooks is None:
@@ -884,7 +924,7 @@ class Fiber:
             if init is None:
                 init = getattr(instance, "init", None)
             return init() if callable(init) else None
-        return callback(self.ctx, self.config)
+        return callback(self.ctx, config)
 
     # -- root fiber —— 根 fiber ----------------------------------------------
     async def _root_dispose(self) -> None:
@@ -1147,3 +1187,13 @@ async def _coerce(awaitable: Awaitable[Any]) -> Any:
     if inspect.isawaitable(awaitable):
         return await awaitable
     return awaitable
+
+
+def _consume_failure(task: asyncio.Task[Any]) -> None:
+    """Port of ``promise.catch(() => {})``: mark a failure as observed.
+
+    取走任务的异常（若有）并丢弃，避免任务被回收时报「Task exception was
+    never retrieved」；``await task`` 仍会照常抛出该异常，不影响调用方观察。
+    """
+    if not task.cancelled():
+        task.exception()

@@ -332,7 +332,11 @@ class Context:
 
     # -- fiber —— 生命周期（转发到 fiber） -----------------------------------
     async def update(self, config: Any, no_save: bool = False) -> Any:
-        return await self.fiber.update(config, no_save)
+        result = self.fiber.update(config, no_save)
+        # 监听器否决更新时返回 None，没有可等待的对象
+        if result is None:
+            return None
+        return await result
 
     async def restart(self) -> None:
         return await self.fiber.restart()
