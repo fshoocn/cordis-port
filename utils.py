@@ -222,24 +222,26 @@ class _Symbols:
     caller = _symbol_for("cordis.caller")          # 调用方上下文
     receiver = _symbol_for("cordis.receiver")      # 属性访问的接收者
     original = _symbol_for("cordis.original")      # 追踪代理背后的原始对象
-    metadata = _symbol_for("cordis.metadata")      # 装饰器元数据（如 @Inject）
+    decorator = _symbol_for("cordis.decorator")    # 装饰器元数据（如 @Inject）
     initHooks = _symbol_for("cordis.initHooks")    # 实例初始化钩子列表
     checkProto = _symbol_for("cordis.checkProto")  # 标记 inject 已走原型合并
 
     # context symbols —— 上下文协议
+    root = _symbol_for("cordis.root")              # 根上下文（避免 root 命名冲突）
     effect = _symbol_for("cordis.effect")          # 副作用元信息（EffectMeta）
     filter = _symbol_for("cordis.filter")          # 事件过滤协议
     isolate = _symbol_for("cordis.isolate")        # 隔离层（服务可见性边界）
     intercept = _symbol_for("cordis.intercept")    # 拦截层（配置覆盖）
 
     # service symbols —— 服务协议
-    init = _symbol_for("cordis.init")                      # 服务初始化
-    check = _symbol_for("cordis.check")                    # 服务可用性检查
-    config = _symbol_for("cordis.config")                  # 服务配置
-    invoke = _symbol_for("cordis.invoke")                  # 可调用服务入口
-    extend = _symbol_for("cordis.extend")                  # 服务视图派生
-    tracker = _symbol_for("cordis.tracker")                # 追踪器
-    resolveConfig = _symbol_for("cordis.resolveConfig")    # 配置合并
+    init = _symbol_for("cordis.init")                          # 服务初始化
+    check = _symbol_for("cordis.check")                        # 服务可用性检查
+    metadata = _symbol_for("cordis.metadata")                  # 服务元数据（拦截配置）
+    invoke = _symbol_for("cordis.invoke")                      # 可调用服务入口
+    extend = _symbol_for("cordis.extend")                      # 服务视图派生
+    tracker = _symbol_for("cordis.tracker")                    # 追踪器
+    mergeIntercept = _symbol_for("cordis.mergeIntercept")      # 拦截配置合并
+    resolveIntercept = _symbol_for("cordis.resolveIntercept")  # 拦截配置解析
 
     # `Context.is` protocol symbol (`Symbol.for('cordis.is')`)
     is_context = _symbol_for("cordis.is")  # 类型判断协议（``Context.is``）

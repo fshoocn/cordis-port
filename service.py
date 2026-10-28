@@ -14,10 +14,11 @@ official symbol              Python method
 ``symbols.invoke``           ``__invoke__(self, *args)``
 ``symbols.filter``           ``__filter__(self, ctx)``
 ``symbols.extend``           ``__extend__(self, props)``
-``symbols.resolveConfig``    ``__resolve_config__(self, base, head)``
+``symbols.mergeIntercept``   ``__merge_intercept__(self, *values)``
+``symbols.resolveIntercept`` ``__resolve_intercept__(self)``
 ``symbols.check``            ``__check__(self)``
 ``symbols.init``             ``__init_service__(self)``
-``symbols.config``           ``Config`` class attribute
+``symbols.metadata``         ``Config`` class attribute
 ===========================  ==========================
 
 中文说明
@@ -43,12 +44,13 @@ official symbol              Python method
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from .utils import (
     ProtoDict,
     Tracker,
     get_symbol,
+    is_nullable,
     protocol_attr,
     register_protocol,
     set_symbol,
@@ -66,12 +68,66 @@ ConfigT = TypeVar("ConfigT")
 register_protocol(symbols.invoke, "__invoke__")
 register_protocol(symbols.filter, "__filter__")
 register_protocol(symbols.extend, "__extend__")
-register_protocol(symbols.resolveConfig, "__resolve_config__")
+register_protocol(symbols.mergeIntercept, "__merge_intercept__")
+register_protocol(symbols.resolveIntercept, "__resolve_intercept__")
 register_protocol(symbols.check, "__check__")
 register_protocol(symbols.init, "__init_service__")
 
 
-class Service(Generic[ConfigT]):
+def merge_intercept_config(host: Any, *values: Any) -> Any:
+    """``[symbols.mergeIntercept]`` 的共享实现（非 Service 的宿主也可复用）。
+
+    合并多层拦截配置：优先使用配置模型自带的 ``merge``，否则退化为浅层
+    字典 update（后者覆盖前者）。
+    """
+    merge = getattr(getattr(type(host), "Config", None), "merge", None)
+    if callable(merge):
+        return merge(*values)
+    result: dict[str, Any] = {}
+    for value in values:
+        if isinstance(value, dict):
+            result.update(value)
+    return result
+
+
+def resolve_intercept_config(host: Any) -> Any:
+    """Port of ``[symbols.resolveIntercept]`` 的共享实现。
+
+    解析 ``host.name`` 服务的「生效配置」，优先级从低到高：
+
+    1. **注入元数据**：声明该依赖的 fiber 在 ``inject`` 里为本服务写的配置
+       （沿 fiber 树经 :func:`~reflect.locate` 找到声明方）；
+    2. **拦截层**（``ctx[symbols.intercept]`` 原型链）：越靠近当前上下文的层
+       优先级越高。
+
+    最后按 :meth:`Service.__merge_intercept__` 合并。非 Service 的宿主
+    （如 :class:`~logger.LoggerService`）也可直接调用本函数。
+    """
+    from .reflect import locate
+
+    values: list[Any] = []
+    intercept = host.ctx.__get_symbol__(symbols.intercept, ProtoDict())
+    layers = intercept.chain() if isinstance(intercept, ProtoDict) else [intercept]
+    # 逐层收集本服务名对应的自有配置，越靠当前层优先级越高
+    for layer in layers:
+        if host.name not in layer:
+            continue
+        if isinstance(layer, ProtoDict) and not layer.has_own(host.name):
+            continue
+        values.insert(0, layer[host.name])
+    caller = get_symbol(host, symbols.caller) or host.ctx
+    result = locate(caller, host.name)
+    entry = result[0].inject.get(host.name) if result and result[0] is not None else None
+    if entry is not None and not is_nullable(entry.config):
+        values.insert(0, entry.config)
+    merge = get_symbol(host, symbols.mergeIntercept)
+    if callable(merge):
+        return merge(*values)
+    # 官方回退到 Service 原型上的实现（非 Service 的宿主走共享实现）
+    return merge_intercept_config(host, *values)
+
+
+class Service[ConfigT]:
     """Port of the official abstract ``Service`` class.
 
     服务基类。子类通常只需声明类属性 ``provide``（服务名）与 ``Config``（配置
@@ -81,24 +137,26 @@ class Service(Generic[ConfigT]):
     # 官方静态符号（命名与 TS 版 ``Service.invoke`` 等保持一致，便于对照阅读）
     init = symbols.init
     check = symbols.check
-    config = symbols.config
+    metadata = symbols.metadata
     invoke = symbols.invoke
     extend = symbols.extend
     tracker = symbols.tracker
-    resolveConfig = symbols.resolveConfig
+    mergeIntercept = symbols.mergeIntercept
+    resolveIntercept = symbols.resolveIntercept
 
     # 以下为 Python 风格的下划线别名，与上面的名称指向同一符号对象
     init_key = symbols.init
     check_key = symbols.check
-    config_key = symbols.config
+    metadata_key = symbols.metadata
     invoke_key = symbols.invoke
     extend_key = symbols.extend
     tracker_key = symbols.tracker
-    resolve_config_key = symbols.resolveConfig
+    merge_intercept_key = symbols.mergeIntercept
+    resolve_intercept_key = symbols.resolveIntercept
 
     name: str
     ctx: Context
-    #: 配置模型；若它定义了 ``merge`` 方法，``__resolve_config__`` 会优先调用它
+    #: 配置模型；若它定义了 ``merge`` 方法，``__merge_intercept__`` 会优先调用它
     Config: Any = None
     #: 服务名；子类可直接写 ``provide = "foo"``，无需在构造时显式传 name
     provide: str | None = None
@@ -194,37 +252,20 @@ class Service(Generic[ConfigT]):
             setattr(self_value, key, value)
         return self_value
 
-    def __resolve_config__(
-        self, base: ConfigT | None = None, head: ConfigT | None = None
-    ) -> ConfigT:
-        """Port of ``[symbols.resolveConfig]``.
+    def __merge_intercept__(self, *values: ConfigT) -> ConfigT:
+        """Port of ``[symbols.mergeIntercept]``: merge intercept config layers.
 
-        按「拦截层（intercept）→ base → 服务自身拦截配置 → head」的顺序合并配置：
-
-        * 拦截层取自 ``ctx[symbols.intercept]`` 的原型链，``insert(0)`` 保证越靠近
-          当前上下文的层优先级越高（后写入者覆盖先写入者）；
-        * 若 ``Config`` 定义了 ``merge`` 方法则交由它合并，否则退化为浅层字典 update。
+        合并多层拦截配置：优先使用配置模型自带的 ``merge``（例如 cosmokit 的
+        ``Config.merge``），否则退化为浅层字典 update（后者覆盖前者）。
         """
-        intercept = self.ctx.__get_symbol__(symbols.intercept, ProtoDict())
-        configs: list[Any] = []
-        layers = intercept.chain() if isinstance(intercept, ProtoDict) else [intercept]
-        # 逐层收集本服务名对应的配置，越靠当前层优先级越高
-        for layer in layers:
-            if self.name in layer:
-                configs.insert(0, layer[self.name])
-        if base is not None:
-            configs.insert(0, base)
-        if head is not None:
-            configs.append(head)
-        # 优先使用配置模型自带的 merge（例如 cosmokit 的 Config.merge）
-        merge = getattr(getattr(type(self), "Config", None), "merge", None)
-        if callable(merge):
-            return cast(ConfigT, merge(*configs))
-        result: dict[str, Any] = {}
-        for config in configs:
-            if isinstance(config, dict):
-                result.update(config)
-        return cast(ConfigT, result)
+        return cast(ConfigT, merge_intercept_config(self, *values))
+
+    def __resolve_intercept__(self) -> ConfigT:
+        """Port of ``[symbols.resolveIntercept]``: resolve this service's config.
+
+        解析本服务的「生效配置」（见 :func:`resolve_intercept_config`）。
+        """
+        return cast(ConfigT, resolve_intercept_config(self))
 
     # -- 基类协议默认实现（子类可覆盖） --------------------------------------
     def __check__(self) -> bool:

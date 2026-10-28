@@ -44,11 +44,11 @@ from collections.abc import AsyncIterable, Awaitable, Callable, Generator, Itera
 from typing import TYPE_CHECKING, Any, ClassVar, TypeGuard, cast
 
 from .registry import (
+    InjectEntry,
     Runtime,
 )
 from .utils import (
     DisposableList,
-    ProtoDict,
     StackInfo,
     compose_error,
     get_symbol,
@@ -128,10 +128,30 @@ class ValidationError(TypeError):
                 issue.get("path") if isinstance(issue, dict) else None
             )
             if path:
-                lines.append(f"  - {message} (at {'.'.join(str(p) for p in path)})")
+                lines.append(f"  - {message} (at {ValidationError.format_path(path)})")
             else:
                 lines.append(f"  - {message}")
         super().__init__("\n".join(lines))
+
+    @staticmethod
+    def normalize_path(path: Any = None) -> list[Any]:
+        """Port of ``ValidationError.normalizePath``.
+
+        路径段可能是带 ``key`` 的对象（标准 Schema 的属性键段），取其 ``key``。
+        """
+        return [
+            getattr(segment, "key", segment) for segment in (path if path else [])
+        ]
+
+    @staticmethod
+    def format_path(path: Any = None) -> str:
+        """Port of ``ValidationError.formatPath``: ``path.join('.')``。"""
+        return ".".join(str(part) for part in ValidationError.normalize_path(path))
+
+    @classmethod
+    def is_(cls, error: Any) -> TypeGuard[ValidationError]:
+        """Port of ``ValidationError.is``：跨模块判断配置校验错误。"""
+        return isinstance(error, ValidationError)
 
 
 class EffectRunner[T]:
@@ -258,21 +278,25 @@ class Fiber:
     config: Any
     runtime: Runtime | None
     state: FiberState
-    store: dict[str, Impl] | None
+    #: 已绑定的依赖视图快照（名字 -> 实现），加载期间对外可见
+    committed: dict[str, Impl] | None
+    #: 本 fiber 提供的服务实现（销毁顺序控制：先等依赖方卸载完）
+    provisions: set[Impl]
     inertia: asyncio.Task[None] | _Completed | None
-    inject: dict[str, Any | None]
+    inject: dict[str, InjectEntry]
     _hooks: dict[str, DisposableList[Callable[..., Any]]]
     _disposables: DisposableList[Disposable[Any]]
     _store: dict[str, Impl]
     _error: BaseException | None
     _revision: int
+    _release: Callable[[], None] | None
     _runner: EffectRunner[str]
 
     def __init__(
         self,
         parent: Context,
         config: Any,
-        inject: dict[str, Any | None] | None = None,
+        inject: dict[str, InjectEntry] | None = None,
         runtime: Runtime | None = None,
         get_outer_stack: Callable[[], list[str]] | None = None,
     ) -> None:
@@ -281,7 +305,7 @@ class Fiber:
         参数:
             parent: 父上下文（fiber 的 ``ctx`` 由它 ``extend`` 得到）。
             config: 插件配置（会在绑定时用 Schema 校验）。
-            inject: 依赖声明（``{服务名: 配置}``）。
+            inject: 依赖声明（``{服务名: :class:`InjectEntry`}``）。
             runtime: 插件运行时记录；``None`` 表示这是「根 fiber」。
             get_outer_stack: 长栈提供者，默认自动抓取当前栈。
         """
@@ -293,13 +317,15 @@ class Fiber:
         self.runtime = runtime
         self.uid = None
         self.state = FiberState.PENDING
-        self.store = None
+        self.committed = None
+        self.provisions = set()
         self.inertia = None
         self._hooks = {}
         self._disposables = DisposableList[Disposable[Any]]()
         self._store: dict[str, Impl] = {}
         self._error: BaseException | None = None
         self._revision = 0
+        self._release: Callable[[], None] | None = None
         self._runner: EffectRunner[str]
         self._get_outer_stack = get_outer_stack or build_outer_stack()
         # no_shadow：fiber 自身不做定义点追踪
@@ -313,7 +339,7 @@ class Fiber:
             # root fiber —— 根 fiber：不承载插件，恒为 ACTIVE
             self.uid = 0
             self.ctx = self.context = parent
-            self.store = {}
+            self.committed = {}
             self.state = FiberState.ACTIVE
             # 根 fiber 的初始纪元与修订号初值一致（"0"），restart() 递增修订号即重载
             self._runner = EffectRunner(lambda: None, "0", collect, self._get_outer_stack)
@@ -322,19 +348,6 @@ class Fiber:
 
         self.uid = parent.registry.counter
         self.ctx = self.context = parent.extend({"fiber": self})
-
-        # 把依赖配置写进 intercept 层：依赖方（服务）读取时可看到针对自己的配置
-        # 只有非 None 的依赖才需要配置层
-        inject_entries = {k: v for k, v in self.inject.items() if not is_nullable(v)}
-        if inject_entries:
-            current = self.ctx.__get_symbol__(symbols.intercept, ProtoDict())
-            if isinstance(current, ProtoDict):
-                intercept = ProtoDict(proto=current)
-            else:
-                intercept = ProtoDict(mapping=current if isinstance(current, dict) else None)
-            for name, value in inject_entries.items():
-                intercept[name] = value
-            self.ctx.__set_symbol__(symbols.intercept, intercept)
 
         self._runner = EffectRunner(self._run_plugin, INACTIVE, collect, self._get_outer_stack)
         # 广播「新插件出现」，供需要感知插件列表的扩展使用
@@ -383,6 +396,12 @@ class Fiber:
             self._set_epoch(INACTIVE)
             while self.inertia is not None:
                 await self.inertia
+            # `_set_epoch` above returns early for a fiber that was not ACTIVE,
+            # so the cached state is not refreshed. Re-derive it now that `uid`
+            # is null; the empty callback falls through to `get_state()`.
+            # 上面的 _set_epoch 对非 ACTIVE 的 fiber 会提前返回，状态未刷新；
+            # 此刻 uid 已置空，用空回调重推一次状态（落到 DISPOSED）。
+            self._update_state(lambda: None)
 
         return dispose
 
@@ -465,26 +484,41 @@ class Fiber:
                     safe_collect(value)
                 return _await()
             if isinstance(effect, Iterable) and not isinstance(effect, (str, bytes, dict)):
-                # 同步批量：逐个收集销毁函数（生成器也走这条路径）
+                # 同步批量：逐个收集销毁函数（生成器也走这条路径）；生成器的
+                # 返回值也视为一项销毁函数（官方语义）
                 info.error = RuntimeError()
                 iterator = iter(effect)
                 while True:
                     try:
                         result = next(iterator)
-                    except StopIteration:
+                    except StopIteration as stop:
+                        safe_collect(stop.value)
                         return None
                     safe_collect(result)
             if hasattr(effect, "__aiter__"):
-                # 异步批量：每产出一项就校验纪元，fiber 已切换状态则立刻停止
+                # 异步批量：每产出一项就校验纪元，fiber 已切换状态则立刻停止；
+                # 停止时关闭生成器（触发其 finally 清理）
                 async_effect = cast(AsyncIterable[Disposable[Any] | None], effect)
                 async def _consume() -> None:
                     await asyncio.sleep(0)  # force async stack trace
                     info.error = RuntimeError()
-                    async for result in async_effect:
-                        if runner.epoch != old_epoch:
-                            # 纪元变化说明 fiber 已开始卸载，停止继续消费
-                            return
-                        safe_collect(result)
+                    iterator = async_effect.__aiter__()
+                    done = False
+                    try:
+                        while runner.epoch == old_epoch:
+                            try:
+                                result = await iterator.__anext__()
+                            except StopAsyncIteration:
+                                done = True
+                                return
+                            safe_collect(result)
+                    finally:
+                        # close the iterator so that its finally blocks run
+                        # 关闭迭代器，让其 finally 清理逻辑得以执行
+                        if not done:
+                            aclose = getattr(iterator, "aclose", None)
+                            if aclose is not None:
+                                await aclose()
                 return _consume()
             raise TypeError("Invalid effect")
 
@@ -628,10 +662,11 @@ class Fiber:
             return
         # official code walks the global store and pings every service provided
         # by this fiber, so dependencies can (re)bind exactly once per flip.
+        # 按实现自身的隔离键通知，不随提供者分支后续的 isolate 搬迁漂移。
         for key, impl in list(self.ctx.reflect.store.items()):
-            if impl.fiber is not self:
+            if impl.ctx.fiber is not self:
                 continue
-            self.ctx.reflect.notify([impl.name])
+            self.ctx.isolate(impl.name, impl.isolate).reflect.notify([impl.name])
 
     def _check_impl(self, name: str) -> None:
         """Port of ``_checkImpl``.
@@ -658,7 +693,7 @@ class Fiber:
                     self._store.pop(name, None)
                     return
             except BaseException as error:  # noqa: BLE001
-                impl.fiber.ctx.logger.error(error)
+                impl.ctx.logger.error(error)
                 self._store.pop(name, None)
                 return
         self._store[name] = impl
@@ -666,18 +701,22 @@ class Fiber:
     def _refresh(self) -> None:
         """Port of ``_refresh``: recompute the lifecycle epoch.
 
-        重算生命周期纪元：以修订号 ``_revision`` 打头，后接每个依赖的「提供者
-        fiber uid」；任何依赖缺失或提供者已销毁则纪元为 :data:`INACTIVE`。
+        重算生命周期纪元：以修订号 ``_revision`` 打头，后接每个**必需**依赖的
+        「实现序号」；任何必需依赖缺失或提供者已销毁则纪元为 :data:`INACTIVE`。
+        可选依赖（``optional``）不参与纪元——它们的可见性变化只通知不阻塞。
         纪元变化是触发加载/卸载的唯一依据。根 fiber 同样适用——``restart()``
         正是靠递增修订号让纪元必然变化。
         """
         epoch = f"{self._revision}"
-        for name in self.inject:
+        for name, entry in self.inject.items():
+            if not entry.required:
+                # 可选依赖：只通知不阻塞，缺席不计入纪元
+                continue
             impl = self._store.get(name)
-            if impl is None or impl.fiber.uid is None:
+            if impl is None or impl.ctx.fiber.uid is None:
                 epoch = INACTIVE
                 break
-            epoch += f":{impl.fiber.uid}"
+            epoch += f":{impl.uid}"
         self._set_epoch(epoch)
 
     def _set_epoch(self, epoch: str) -> None:
@@ -723,17 +762,29 @@ class Fiber:
         if not isinstance(task, _Completed):
             self.inertia = task
 
-    async def _reload(self) -> None:
-        """Port of ``_reload``.
+    def _reload(self) -> Awaitable[None]:
+        """Port of ``_reload``: run the sync prefix at the call site, then load.
 
-        加载插件：先给依赖方一份 ``_store`` 快照（``store``），再执行插件本体；
-        失败则记录错误并把纪元置为 :data:`INACTIVE`（保持非激活，等待修复）。
-        若等待期间纪元已经变化（出现了更新的目标），则跳过执行直接转卸载，
-        保证「只加载最新配置」；此时旧加载即便失败也不再写入 ``_error``。
+        官方 JS 的 async 函数在首个 await 前同步执行；Python 协程要到 await
+        才启动，因此把「同步前缀」（截取纪元、发布 ``committed`` 快照并登记
+        ``dependents``）放在调用点执行，避免 ``restart()`` 在两者之间改写纪元
+        导致本次加载被误判为「目标未变」。
+        """
+        old_epoch = self._runner.epoch
+        self.committed = dict(self._store)
+        for impl in self.committed.values():
+            if impl.ctx.fiber is not self:
+                impl.dependents.add(self)
+        return self._reload_at(old_epoch)
+
+    async def _reload_at(self, old_epoch: str) -> None:
+        """加载插件（``old_epoch`` 为本次加载的目标纪元）。
+
+        执行插件本体；失败则记录错误并把纪元置为 :data:`INACTIVE`（保持非激活，
+        等待修复）。若等待期间纪元已经变化（出现了更新的目标），则跳过执行直接
+        转卸载，保证「只加载最新配置」；此时旧加载即便失败也不再写入 ``_error``。
         结束时根据纪元是否变化决定「稳定下来」还是立即转入卸载。
         """
-        self.store = dict(self._store)
-        old_epoch = self._runner.epoch
         try:
             await asyncio.sleep(0)
             if self._runner.epoch == old_epoch:
@@ -756,18 +807,60 @@ class Fiber:
 
         self._update_state(finish)
 
-    async def _unload(self) -> None:
-        """Port of ``_unload``.
+    def _unload(self) -> Awaitable[None]:
+        """Port of ``_unload``: run the sync prefix at the call site.
 
-        卸载插件：清空 effect（逆序清理）、等待全部清理完成、丢弃 ``store`` 快照。
-        结束时同样根据纪元决定「稳定」还是「立即重新加载」。
+        无需等待依赖方时，effect 清空在调用点同步完成：清理函数**立即调用**
+        （官方以「同步前缀 + 一微任务延迟」达成同样效果；Python 的 sleep(0)
+        会让出整轮事件循环，比微任务重，因此改为同步调用），effect 闩锁先于
+        已排队的生成器恢复翻转，正在产出的异步生成器才会在下一次推进前停止
+        并被关闭。剩余步骤见 :meth:`_unload_at`。
         """
+        if any(impl.dependents for impl in list(self.provisions)):
+            return self._unload_at(None)
         disposables = self._disposables.clear()
-        await asyncio.gather(
-            *(_unload_one(dispose, self) for dispose in disposables),
-            return_exceptions=True,
+        return self._unload_at(
+            [_invoke_disposable(dispose, self) for dispose in disposables]
         )
-        self.store = None
+
+    async def _unload_at(self, pending: list[Awaitable[None]] | None) -> None:
+        """卸载插件：
+
+        1. 先等待本 fiber 提供的所有服务的依赖方卸载完（「先销依赖方、后销
+           提供者」，保证对方清理期间仍能访问本服务）；
+        2. 等待全部 effect 清理完成（若同步前缀已发起清理则复用）；
+        3. 从各实现的 ``dependents`` 摘除自己，若自己是最后一个依赖方则唤醒
+           提供者（其注销/卸载正等在这里）；
+        4. 丢弃 ``committed`` 快照。
+
+        结束时根据纪元决定「稳定」还是「立即重新加载」。
+        """
+        # Dependents are notified when this fiber leaves ACTIVE, but may still
+        # access its services during their own teardown, so the effects of this
+        # fiber are only disposed after every dependent has unloaded.
+        while any(impl.dependents for impl in list(self.provisions)):
+            await _await_release(self)
+        self._release = None
+        if pending is None:
+            pending = [
+                _invoke_disposable(dispose, self)
+                for dispose in self._disposables.clear()
+            ]
+        await asyncio.gather(*pending, return_exceptions=True)
+        # release the providers waiting for this fiber to unload
+        # 唤醒正在等本 fiber 卸载的提供者
+        for impl in list((self.committed or {}).values()):
+            if self not in impl.dependents:
+                continue
+            impl.dependents.discard(self)
+            if impl.dependents:
+                continue
+            if impl.release is not None:
+                impl.release()
+            provider = impl.ctx.fiber
+            if provider._release is not None:
+                provider._release()
+        self.committed = None
 
         def finish() -> FiberState | None:
             if self._runner.epoch == INACTIVE:
@@ -914,7 +1007,7 @@ class Fiber:
                         if marker in seen_hooks:
                             continue
                         seen_hooks.add(marker)
-                        hook_metadata = get_symbol(hook, symbols.metadata, {})
+                        hook_metadata = get_symbol(hook, symbols.decorator, {})
                         if isinstance(hook_metadata, dict) and hook_metadata.get("inject_hook"):
                             hook(instance, descriptor)
                         else:
@@ -1048,18 +1141,43 @@ def _guard_task(
     return _spawn(_run())
 
 
-async def _unload_one(dispose: Disposable[Any], fiber: Fiber) -> None:
-    """执行单个销毁函数：先让出一次事件循环，异常只记日志不向上抛。
+def _invoke_disposable(
+    dispose: Disposable[Any], fiber: Fiber
+) -> Awaitable[None]:
+    """同步调用清理函数（effect 闩锁立即翻转），返回等待其完成的协程。
 
-    卸载阶段必须「尽力而为」：某个清理项失败不应阻断其它清理项。
+    卸载阶段必须「尽力而为」：某个清理项失败只记日志，不阻断其它清理项。
     """
     try:
-        await asyncio.sleep(0)
         result = dispose()
+    except BaseException as reason:  # noqa: BLE001
+        fiber.ctx.logger.error(reason)
+        return _await_dispose_result(None, fiber)
+    return _await_dispose_result(result, fiber)
+
+
+async def _await_dispose_result(result: Any, fiber: Fiber) -> None:
+    """等待清理函数的异步部分完成；异常只记日志不向上抛。"""
+    try:
         if _is_thenable(result):
             await result
     except BaseException as reason:  # noqa: BLE001
         fiber.ctx.logger.error(reason)
+
+
+async def _await_release(fiber: Fiber) -> None:
+    """挂起等待 ``fiber._release`` 被调用（依赖方全部卸载后由其唤醒）。
+
+    每轮等待都新建一次性回调，与官方「每轮一个新的 Promise」等价。
+    """
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def resolve() -> None:
+        if not future.done():
+            future.set_result(None)
+
+    fiber._release = resolve
+    await future
 
 
 async def _maybe_await(value: Any) -> Any:

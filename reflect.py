@@ -28,12 +28,15 @@ Port of ``packages/core/src/reflect.ts``.  The official file installs a
 
 from __future__ import annotations
 
+import asyncio
+import itertools
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from .fiber import FiberState
 from .utils import (
+    ProtoDict,
     _Symbol,
     get_traceable,
     is_nullable,
@@ -54,6 +57,8 @@ _INTERNAL_PREFIX = "internal/"
 #: 必须绕过服务解析，否则会破坏对象协议。
 RESERVED_WORDS = ("prototype", "then")
 ValueT = TypeVar("ValueT")
+#: 服务实现全局自增序号（进入依赖纪元，服务重登记即触发依赖方重载）
+_IMPL_COUNTER = itertools.count(1)
 #: 访问器 get 签名：``(使用点 ctx, receiver, error) -> 值``
 AccessorGetter = Callable[["Context", Any, BaseException], Any]
 #: 访问器 set 签名：``(使用点 ctx, 新值, receiver, error) -> 是否成功``
@@ -131,22 +136,70 @@ class Property:
         return self.accessor.set if self.accessor is not None else None
 
 
-@dataclass
+@dataclass(eq=False)
 class Impl:
     """One entry in the service store (port of TS ``interface Impl``).
 
     一条服务实现记录：
 
-    * ``name``：服务名（字符串形式，便于日志与 ``fiber.store`` 索引）；
-    * ``fiber``：提供该服务的 fiber（决定生命周期与「归属权」）；
+    * ``uid``：全局自增序号（进入依赖纪元，服务重登记即触发依赖方重载）；
+    * ``name``：服务名（字符串形式，便于日志与索引）；
+    * ``ctx``：注册该服务时的上下文（``ctx.fiber`` 即提供者 fiber）；
+    * ``isolate``：实际生效的隔离键（提供者分支被 isolate 搬迁后仍保留原键）；
+    * ``dependents``：当前已绑定该实现的依赖方 fiber（销毁顺序控制用）；
     * ``value``：当前服务实例；
-    * ``check``：可用性检查函数，返回假值时依赖方视为「依赖未就绪」。
+    * ``check``：可用性检查函数，返回假值时依赖方视为「依赖未就绪」；
+    * ``release``：注销时等待依赖方清理完的释放回调（见 ``provide``）。
     """
 
+    uid: int
     name: str
-    fiber: Fiber
+    ctx: Context
+    isolate: _Symbol
+    dependents: set[Fiber] = field(default_factory=set)
     value: Any = None
     check: Callable[[], bool] | None = None
+    release: Callable[[], None] | None = None
+
+
+def locate(ctx: Context, name: str) -> tuple[Fiber | None, Impl | None] | None:
+    """Port of the ``locate`` helper (resolve a service access along fibers).
+
+    从定义点 ``ctx`` 出发沿 fiber 树向上解析对服务 ``name`` 的一次访问，返回
+    ``(fiber, impl)``（缺项为 ``None``）：
+
+    * ``(None, impl)``：当前 fiber 自己在同一个隔离层提供了该实现；
+    * ``(fiber, impl)``：实现来自 ``fiber`` 的已绑定视图（``committed``）；
+    * ``(fiber, None)``：``fiber`` 声明了该依赖但尚未就绪（未激活）；
+    * ``None``：没有任何 fiber 声明它，或查找途中命中了隔离边界（同名服务
+      被 ``isolate`` 隔开，不允许穿透）。
+    """
+    key = ctx.interface(name)
+    table = ctx.__get_symbol__(symbols.isolate, None)
+    fiber = ctx.fiber
+    while True:
+        impl: Impl | None = None
+        for provision in fiber.provisions:
+            if provision.name == name and provision.ctx.interface(name) == key:
+                impl = provision
+        if impl is not None:
+            return (None, impl)
+        # 隔离边界检查：从访问点的隔离层走到当前 fiber 的隔离层，中途若发现
+        # 某层自有该名字，说明同名服务被 isolate 隔开，查找到此为止
+        fiber_table = fiber.ctx.__get_symbol__(symbols.isolate, None)
+        while table is not fiber_table:
+            if table is None or (isinstance(table, ProtoDict) and table.has_own(name)):
+                return None
+            table = getattr(table, "proto", None)
+        impl = (fiber.committed or {}).get(name)
+        if impl is not None or name in fiber.inject:
+            return (fiber, impl)
+        if fiber.runtime is None:
+            return None
+        parent = fiber.parent
+        if parent is None:
+            return None
+        fiber = parent.fiber
 
 
 class ReflectService:
@@ -232,29 +285,22 @@ class ReflectService:
 
             def _fallback() -> Any:
                 """沿 fiber 树向上查找：命中已注入的实现，或给出精确报错。"""
-                key = ctx.interface(prop)
-                fiber = def_site.fiber
-                while True:
-                    store = fiber.store
-                    impl = store.get(prop) if store is not None else None
-                    if impl is not None:
-                        return get_traceable(ctx, impl.value)
-                    if prop in fiber.inject:
-                        # 已在依赖声明中，但当前 fiber 未激活（尚未注入）
-                        error.args = (
-                            f'cannot get required service "{prop}" in inactive context',
-                        )
-                        raise error
-                    if fiber.runtime is None:
-                        raise error
-                    # 隔离键不同说明跨越了 isolate 边界，不再向上查找
-                    parent_key = fiber.parent.interface(prop) if fiber.parent is not None else None
-                    if parent_key != key:
-                        raise error
-                    parent = fiber.parent
-                    if parent is None:
-                        raise error
-                    fiber = parent.fiber
+                result = locate(def_site, prop)
+                if result is None:
+                    raise error
+                declared, impl = result
+                if impl is not None:
+                    return get_traceable(ctx, impl.value)
+                if declared is not None:
+                    entry = declared.inject.get(prop)
+                    if entry is not None and not entry.required:
+                        # 可选依赖缺席：静默返回 None，不视为错误
+                        return None
+                    # 已在依赖声明中，但当前 fiber 未激活（尚未注入）
+                    error.args = (
+                        f'cannot get required service "{prop}" in inactive context',
+                    )
+                raise error
 
             # 场景三：先给插件一次补位机会（瀑布事件），否则执行 _fallback
             return ctx.events.waterfall("internal/get", ctx, prop, error, _fallback)
@@ -337,7 +383,7 @@ class ReflectService:
         impl = self.store.get(key)
         if impl is None:
             return None
-        if strict and impl.fiber.state is not FiberState.ACTIVE:
+        if strict and impl.ctx.fiber.state is not FiberState.ACTIVE:
             return None
         return impl
 
@@ -366,7 +412,7 @@ class ReflectService:
         impl = self.store.get(key) if key is not None else None
         if impl is None:
             raise AttributeError(f'cannot set property "{name}" without provide')
-        if impl.fiber is not self.ctx.fiber:
+        if impl.ctx.fiber is not self.ctx.fiber:
             raise AttributeError(f'cannot set property "{name}" in multiple fibers')
         impl.value = value
         return True
@@ -386,7 +432,9 @@ class ReflectService:
         1. 校验 ``props`` 中同名声明不是访问器；
         2. 若根上下文的隔离层尚无该名字，则生成唯一服务键（``Symbol(name)``）；
         3. 若该键已被占用则报错（同一隔离层内服务名必须唯一）；
-        4. 写入 ``store`` 与当前 fiber 的 ``store``，激活状态下立即通知依赖方。
+        4. 写入 ``store`` 与当前 fiber 的 ``provisions``，激活状态下立即通知依赖方；
+        5. 注销时先移除绑定并通知，再等待依赖方全部清理完才移除提供记录
+           （「先销依赖方、后销提供者」，保证清理期间服务仍可访问）。
         """
 
         def execute() -> Callable[[], Any]:
@@ -395,36 +443,49 @@ class ReflectService:
                 raise TypeError(f'property "{name}" is already declared as {prop.type}')
             self.props[name] = Property(type="service")
 
-            # `this.ctx.root[symbols.isolate][name] ??= Symbol(name)`
+            # `this.ctx[symbols.root][symbols.isolate][name] ??= Symbol(name)`
             # 服务键只在根上下文的隔离层中生成一次，后代上下文继承该键
-            if self.ctx.root.interface(name) is None:
-                self.ctx.root.set_interface(name, service_symbol(name))
+            root = self.ctx.__get_symbol__(symbols.root) or self.ctx
+            if root.interface(name) is None:
+                root.set_interface(name, service_symbol(name))
             key = self._key(name)
             if key is None:
                 raise RuntimeError(f'cannot resolve service key "{name}"')
             existing = self.store.get(key)
             if existing is not None:
                 raise RuntimeError(
-                    f'service "{name}" has been registered at <{existing.fiber.name}>'
+                    f'service "{name}" has been registered at <{existing.ctx.fiber.name}>'
                 )
-            impl = Impl(name=name, fiber=self.ctx.fiber, value=value, check=check)
+            impl = Impl(
+                uid=next(_IMPL_COUNTER),
+                name=name,
+                ctx=self.ctx,
+                isolate=key,
+                value=value,
+                check=check,
+            )
             self.store[key] = impl
-            if self.ctx.fiber.store is None:
-                self.ctx.fiber.store = {}
-            # fiber.store 是「本 fiber 可见的服务」快照，供 handler_get 快速命中
-            self.ctx.fiber.store[name] = impl
+            # provisions 是「本 fiber 提供的服务」集合，供 locate 判定归属
+            self.ctx.fiber.provisions.add(impl)
             if self.ctx.fiber.state is FiberState.ACTIVE:
                 self.notify([name])
 
             async def dispose() -> None:
-                self.store.pop(key, None)
-                fibers = self.notify([name])
-                # 等待依赖方完成卸载/重载后，才清理自己的 store 快照，
-                # 保证卸载过程中依赖方仍能读到自己
-                await _wait_fibers(fibers)
+                if self.store.get(impl.isolate) is impl:
+                    self.store.pop(impl.isolate, None)
+                # 按实现自身的隔离键通知，不随提供者分支后续的 isolate 搬迁漂移
+                self.ctx.isolate(name, impl.isolate).reflect.notify([name])
+                # Retired bindings cannot gain new dependents. Wait only for
+                # their cleanup, even if a fiber has left the registry or
+                # starts a new load. Yield even without direct dependents so
+                # child cleanup can still access the inherited service before
+                # its provision is removed.
+                # 已注销的绑定不会再有新依赖方：只需等现有依赖方清理完；即使
+                # 没有直接依赖方也让出一步，保证子级清理仍能访问继承的服务。
+                await _wait_released(impl)
+                impl.release = None
                 # ensure self access before dependencies cleanup
-                if self.ctx.fiber.store is not None:
-                    self.ctx.fiber.store.pop(name, None)
+                self.ctx.fiber.provisions.discard(impl)
 
             return dispose
 
@@ -434,12 +495,13 @@ class ReflectService:
         self,
         names: list[str],
         filter: Callable[[Context, str], bool] | None = None,
-    ) -> list[Fiber]:
+    ) -> None:
         """Port of ``notify``: re-check depending fibers and emit the event.
 
         服务集合变化后的统一处理：
-        1. 遍历所有运行中的 fiber，凡是注入过 ``names`` 中某项的，重新检查实现并
-           ``_refresh()``（必要时触发重载），收集受影响的 fiber 返回；
+        1. 遍历所有运行中的 fiber，凡是注入过 ``names`` 中某项的（含可选依赖），
+           重新检查实现并 ``_refresh()``（必需依赖变化时会触发重载，可选依赖
+           只更新可见性不阻塞）；
         2. 对每个名字派发 ``internal/service`` 事件（带过滤上下文，只通知同一
            隔离层的监听者）。
 
@@ -447,7 +509,6 @@ class ReflectService:
         """
         if filter is None:
             filter = lambda ctx, name: ctx.interface(name) == self.ctx.interface(name)
-        fibers: list[Fiber] = []
         for runtime in list(self.ctx.registry.values()):
             for fiber in list(runtime.fibers):
                 changed = False
@@ -459,7 +520,6 @@ class ReflectService:
                 if not changed:
                     continue
                 fiber._refresh()
-                fibers.append(fiber)
 
         for name in names:
             # `self[symbols.filter] = target => filter(target, name)` then emit
@@ -468,7 +528,6 @@ class ReflectService:
             set_symbol(self_site, symbols.filter, _make_filter(filter, name))
             impl = self._get_impl(name, False)
             self.ctx.events.emit(self_site, "internal/service", name, impl.value if impl else None)
-        return fibers
 
     # -- accessors —— 访问器 -------------------------------------------------
     def accessor(self, name: str, options: PropertyAccessor | AccessorOptions) -> Callable[[], Any]:
@@ -605,10 +664,22 @@ def _make_filter(filter: Callable[[Context, str], bool], name: str) -> Callable[
     return event_filter
 
 
-async def _wait_fibers(fibers: list[Fiber]) -> None:
-    """等待这些 fiber 完成当前的加载/卸载（服务注销时保证依赖方先就绪）。"""
-    for fiber in fibers:
-        await fiber.wait()
+async def _wait_released(impl: Impl) -> None:
+    """等待 ``impl`` 的全部依赖方完成清理（无依赖方时也让出一步）。
+
+    依赖方在 ``Fiber._unload`` 末尾把自身从 ``dependents`` 摘除，最后一个
+    离开者调用 ``impl.release()`` 唤醒这里。
+    """
+    future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def resolve() -> None:
+        if not future.done():
+            future.set_result(None)
+
+    impl.release = resolve
+    if not impl.dependents:
+        resolve()
+    await future
 
 
 def _init_tracker() -> None:

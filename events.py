@@ -94,15 +94,19 @@ class Hook:
 class EventDispatchError(Exception):
     """Aggregate error raised by ``parallel`` (port of ``AggregateError``).
 
-    ``parallel`` 中多个监听器失败时，把它们的异常收集进 ``errors`` 一并抛出。
+    ``parallel`` 中多个监听器失败时，把它们的异常收集进 ``errors`` 一并抛出，
+    消息中带上出错的事件名（官方语义，便于定位）。
     """
 
-    def __init__(self, errors: list[BaseException]) -> None:
+    def __init__(self, errors: list[BaseException], name: EventName | None = None) -> None:
         self.errors = errors
-        super().__init__(
-            "; ".join(str(error) for error in errors)
-            or f"{len(errors)} event callback(s) failed"
-        )
+        if isinstance(name, str):
+            label = f'"{name}"'
+        elif name is not None:
+            label = str(name)
+        else:
+            label = '"unknown"'
+        super().__init__(f"one or more listeners of event {label} failed")
 
 
 @dataclass
@@ -175,13 +179,19 @@ class EventsService:
             """``internal/update``: run every private hook, then ``next``.
 
             把 fiber 私有钩子串成责任链：每个钩子都能选择先做自己的事再调 ``next``，
-            或直接返回（不调 ``next``）以否决默认更新逻辑。
+            或直接返回（不调 ``next``）以否决默认更新逻辑；``next(x)`` 的参数可
+            覆盖配置，跨钩子传递（与 waterfall 的 ``next(value)`` 语义一致）。
             """
             cbs = list(target._hooks.get("internal/update", []))
+            current = config
 
-            def _next() -> Any:
+            def _next(*values: Any) -> Any:
+                nonlocal current
+                if values:
+                    # 参数可覆盖：跨钩子传值
+                    current = values[0]
                 callback = cbs.pop(0) if cbs else next_hook
-                return callback(config, _next)
+                return callback(current, _next)
 
             return _next()
 
@@ -214,7 +224,7 @@ class EventsService:
     # -- resolution —— 监听器解析 --------------------------------------------
     def _resolve(
         self, mode: str, args: list[Any]
-    ) -> tuple[Any, list[Callable[..., Any]]]:
+    ) -> tuple[Any, list[Callable[..., Any]], EventName | None]:
         """Port of ``_resolve``: pop ``thisArg``/name, honour filters and hooks.
 
         从实参列表中解析出事件名与「待调用回调列表」：
@@ -230,7 +240,7 @@ class EventsService:
             this_arg = args.pop(0)
         name = args.pop(0) if args else None
         if not isinstance(name, (str, _Symbol)):
-            return this_arg, []
+            return this_arg, [], None
 
         hooks = self._hooks.get("internal/dispatch")
         if hooks and (not isinstance(name, str) or not name.startswith("internal/")):
@@ -247,29 +257,29 @@ class EventsService:
             if getattr(callback, "_cordis_uses_this_arg", False):
                 callback = _bind_this_arg(callback, this_arg)
             callbacks.append(callback)
-        return this_arg, callbacks
+        return this_arg, callbacks, name
 
     # -- dispatch modes —— 五种派发模式 --------------------------------------
     async def parallel(self, *args: Any) -> None:
         """Port of ``parallel``: run everything, raise an aggregate error.
 
         并发执行所有监听器：全部等待完成，若存在异常则统一抛
-        :class:`EventDispatchError`（``errors`` 保留原始异常列表）。
+        :class:`EventDispatchError`（``errors`` 保留原始异常列表，消息带事件名）。
         """
         pending = list(args)
-        this_arg, callbacks = self._resolve("parallel", pending)
+        this_arg, callbacks, name = self._resolve("parallel", pending)
         results = await asyncio.gather(
             *(_invoke(callback, this_arg, pending) for callback in callbacks),
             return_exceptions=True,
         )
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors:
-            raise EventDispatchError(errors)
+            raise EventDispatchError(errors, name)
 
     def emit(self, *args: Any) -> None:
         """``emit``：同步依次调用所有监听器，忽略返回值（日志/通知型事件）。"""
         pending = list(args)
-        this_arg, callbacks = self._resolve("emit", pending)
+        this_arg, callbacks, _ = self._resolve("emit", pending)
         for callback in callbacks:
             _apply(callback, this_arg, pending)
 
@@ -280,7 +290,7 @@ class EventsService:
         取第一个可用实现等场景。
         """
         pending = list(args)
-        this_arg, callbacks = self._resolve("serial", pending)
+        this_arg, callbacks, _ = self._resolve("serial", pending)
         for callback in callbacks:
             result = _apply(callback, this_arg, pending)
             if inspect.isawaitable(result):
@@ -292,7 +302,7 @@ class EventsService:
     def bail(self, *args: Any) -> Any:
         """``bail``：``serial`` 的同步版本（不 await 返回值）。"""
         pending = list(args)
-        this_arg, callbacks = self._resolve("bail", pending)
+        this_arg, callbacks, _ = self._resolve("bail", pending)
         for callback in callbacks:
             result = _apply(callback, this_arg, pending)
             if is_bailed(result):
@@ -305,9 +315,18 @@ class EventsService:
         链式传递：每个监听器都会额外收到一个 ``next`` 回调，调用它才继续到下一个
         监听器；链条末尾调用初始的 ``inner``（最后一个实参，通常是默认实现）。
         这让监听器可以「环绕」目标逻辑（前置准备 + 后置处理）。
+
+        值的传递（对齐 cordis/Koishi 语义）：
+
+        * **向下游传值**（跨拦截器传值）：``next(x)`` 的参数覆盖「值」
+          （第一个实参），后续监听器收到 ``x``；不传参数则沿用当前值；
+        * **向上传值**：``next()`` 的返回值是剩余链条的结果（含 ``inner`` 的
+          返回值），监听器可在其上做后处理再向上传播；
+        * 同一监听器内 ``next`` 只能调用一次（防重入）；``inner`` 始终无参调用
+          （官方语义：值只在监听器之间经 ``next(value)`` 流动）。
         """
         pending = list(args)
-        this_arg, callbacks = self._resolve("waterfall", pending)
+        this_arg, callbacks, _ = self._resolve("waterfall", pending)
         inner = pending.pop() if pending else None
         if not callable(inner):
             inner = lambda *a, **k: None
@@ -325,12 +344,15 @@ class EventsService:
             index += 1
             called = False
 
-            def next_callback(*_ignored: Any) -> Any:
-                # 官方语义：同一个监听器内重复调用 next 属于编码错误
+            def next_callback(*values: Any) -> Any:
+                # 官方语义：同一个监听器内重复调用 next 属于编码错误；
+                # 传入参数即可覆盖「值」（首参），实现跨监听器传值
                 nonlocal called
                 if called:
                     raise RuntimeError("next() called multiple times")
                 called = True
+                if values and pending:
+                    pending[0] = values[0]
                 return dispatch()
 
             return _apply(callback, this_arg, tuple(pending) + (next_callback,))
@@ -342,7 +364,7 @@ class EventsService:
 
         已废弃：仅解析并返回「绑定后的回调列表」，交由调用方自行执行。
         """
-        this_arg, callbacks = self._resolve(mode, list(args))
+        this_arg, callbacks, _ = self._resolve(mode, list(args))
         return [_bind(callback, this_arg) for callback in callbacks]
 
     # -- registration —— 注册与注销 ------------------------------------------

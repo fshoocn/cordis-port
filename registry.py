@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, ItemsView, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, Iterable, KeysView, ValuesView
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict, runtime_checkable
 
@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     from .context import Context
     from .fiber import Fiber
 
-#: 依赖声明形式：名字列表，或「名字 -> 配置」映射
+#: 依赖声明形式：名字列表、Koishi 风格 ``{required: [...], optional: [...]}``、
+#: 或「名字 -> 配置」映射（全部按必需处理）
 type InjectSpec = list[str] | dict[str, Any | None]
 type PluginConfig = Any
 #: 插件对外提供的服务名（字符串或字符串列表）
@@ -61,6 +62,21 @@ class StandardSchemaIssue(TypedDict, total=False):
 
     message: str
     path: list[str | int]
+
+
+@dataclass
+class InjectEntry:
+    """归一化后的单条依赖声明（Koishi 语义）。
+
+    字段:
+        config: 依赖的拦截配置（合并进服务的拦截配置解析，见
+            :meth:`~service.Service.__resolve_intercept__`）。
+        required: 是否必需。必需依赖缺失会阻塞 fiber 加载（纪元为非激活）；
+            可选依赖（``optional``）缺席时静默视为不可用，不阻塞加载。
+    """
+
+    config: Any = None
+    required: bool = True
 
 
 @dataclass
@@ -201,10 +217,10 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
                 descriptor_kind = "class"
                 method = value.__func__
 
-            metadata = get_symbol(method, symbols.metadata)
+            metadata = get_symbol(method, symbols.decorator)
             if metadata is None:
                 metadata = {}
-                set_symbol(method, symbols.metadata, metadata)
+                set_symbol(method, symbols.decorator, metadata)
             inject = metadata.setdefault("inject", {})
             inject[name] = config
 
@@ -239,7 +255,7 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
                 )
                 self.ctx.inject(inject, callback)
 
-            set_symbol(init_hook, symbols.metadata, {"inject_hook": True})
+            set_symbol(init_hook, symbols.decorator, {"inject_hook": True})
             metadata["init_hook"] = init_hook
             hooks = get_symbol(method, symbols.initHooks)
             if hooks is None:
@@ -254,16 +270,26 @@ def Inject(name: str, config: Any = None) -> Callable[..., Any]:
 
 
 def resolve_inject(
-    inject: InjectSpec | None, result: dict[str, Any | None] | None = None
-) -> dict[str, Any | None]:
+    inject: InjectSpec | None, result: dict[str, InjectEntry] | None = None
+) -> dict[str, InjectEntry]:
     """Port of ``Inject.resolve``: flatten through the prototype chain.
 
     Symbol keys (``symbols.checkProto``) are bookkeeping and never surface as
-    dependencies -- JS uses ``defineProperty`` there, Python uses a plain dict,
+dependencies -- JS uses ``defineProperty`` there, Python uses a plain dict,
     so the keys are filtered explicitly.
 
-    把依赖声明归一化成 ``{名字: 配置或 None}``；带 ``checkProto`` 标记时先递归
-    合并父级 ``inject``，再叠加自身声明的项。
+    把依赖声明归一化成 ``{名字: :class:`InjectEntry`}``；带 ``checkProto`` 标记时先
+    递归合并父级 ``inject``，再叠加自身声明的项。
+
+    支持三种声明形态（Koishi/cordis 语义）：
+
+    * ``['a', 'b']`` —— 名字列表，全部必需；
+    * ``{'required': ['a'], 'optional': ['b']}`` —— Koishi 形态，可选依赖
+      缺席时不阻塞加载（纪元不计）；
+    * ``{'a': config}`` —— 名字到拦截配置的映射，全部必需。
+
+    三种形态可混用：``required`` / ``optional`` 键取列表时按前两种解释，
+    其余键一律按「名字 -> 配置」处理（必需）。
 
     注意：``symbols.checkProto`` 只用于标记，不会作为依赖名出现在结果中
     （因此这里显式跳过非字符串键）。
@@ -273,10 +299,10 @@ def resolve_inject(
     if not inject:
         return result
     if isinstance(inject, (list, tuple)):
-        # 列表形式：只有名字，无配置
+        # 列表形式：只有名字，无配置，全部必需
         for name in inject:
             if isinstance(name, str):
-                result[name] = None
+                result[name] = InjectEntry()
         return result
     if get_symbol(inject, symbols.checkProto):
         # 需要合并父级声明：先父后子，子级覆盖父级
@@ -293,16 +319,29 @@ def resolve_inject(
         if parent is not None:
             resolve_inject(parent, result)
         items = inject.items() if isinstance(inject, dict) else vars(inject).items()
-        for name, value in items:
-            if isinstance(name, str):
-                result[name] = value if value is not None else None
+        _collect_inject_items(items, result)
         return result
     items = inject.items() if isinstance(inject, dict) else vars(inject).items()
-    for name, value in items:
-        if isinstance(name, str):
-            result[name] = value if value is not None else None
+    _collect_inject_items(items, result)
     return result
 
+
+def _collect_inject_items(
+    items: Iterable[tuple[Any, Any]], result: dict[str, InjectEntry]
+) -> None:
+    """把 ``{名字: 配置}`` 与 ``{required/optional: [名字]}`` 两种键形态收进结果。"""
+    for name, value in items:
+        if name in ("required", "optional") and isinstance(value, (list, tuple)):
+            # Koishi 形态：required / optional 名字列表
+            required = name == "required"
+            for dep in value:
+                if isinstance(dep, str):
+                    result[dep] = InjectEntry(required=required)
+            continue
+        if isinstance(name, str):
+            result[name] = (
+                value if isinstance(value, InjectEntry) else InjectEntry(config=value)
+            )
 
 @dataclass
 class _PluginDefinition:

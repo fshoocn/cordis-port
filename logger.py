@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, TypeGuard, cast
 
+from .service import resolve_intercept_config
 from .utils import (
     Tracker,
     get_symbol,
@@ -365,7 +366,10 @@ class Logger:
                 cause = getattr(args[0], "__cause__", None)
                 if cause is not None:
                     self._method(type_, level)(cause)
-                if is_aggregate_error(args[0]):
+                elif is_aggregate_error(args[0]) and args[0].errors:
+                    # An aggregate with no members has nothing to flatten; it is
+                    # logged as itself, like any other error.
+                    # 空的聚合异常没有可拆分的成员，按普通异常原样记录
                     for error in args[0].errors:
                         self._method(type_, level)(error)
                     return
@@ -411,6 +415,8 @@ class LoggerService:
 
     #: 缓冲区上限（消息条数），由 ``bufferSize`` 读写
     buffer_size = 1000
+    #: 拦截/注入配置的解析键（``ctx.intercept('logger', {...})``）
+    name = "logger"
 
     @property
     def bufferSize(self) -> int:
@@ -457,10 +463,10 @@ class LoggerService:
     def _invoke(self, name: str | None, caller: Any = None) -> Logger:
         """解析配置与日志名，构造 :class:`Logger`。
 
-        日志名优先级：显式 ``name`` → 拦截层配置的 ``logger.name`` →
-        调用方 fiber 名（下划线转连字符）。
+        日志名优先级：显式 ``name`` → 拦截层/注入元数据解析出的
+        ``logger.name`` → 调用方 fiber 名（下划线转连字符）。
         """
-        config = self._resolve_config()
+        config = resolve_intercept_config(self)
         fiber = (caller or self.ctx).fiber
         resolved = name or config.get("name") or _hyphenate(fiber.name)
         return Logger(
@@ -473,27 +479,12 @@ class LoggerService:
         )
 
     def _resolve_config(self) -> LoggerIntercept:
-        """Walk the intercept chain and merge ``logger`` configs.
+        """兼容入口：转发到 :func:`~service.resolve_intercept_config`。
 
-        沿拦截层（``intercept`` 原型链）收集 ``logger`` 配置并合并：越靠近当前
-        上下文的层优先级越高（因此用 ``insert(0, ...)``）。
+        沿拦截层（``intercept`` 原型链）收集 ``logger`` 配置并合并；声明该依赖
+        的 fiber 在 ``inject`` 中写的配置优先级低于上下文拦截层（官方语义）。
         """
-        intercept = self.ctx.__get_symbol__(symbols.intercept, {})
-        configs: list[Any] = []
-        layers = intercept.chain() if hasattr(intercept, "chain") else [intercept]
-        for layer in layers:
-            if "logger" in layer:
-                # 只取本层「自有」的 logger 配置，避免重复收集原型链上的值
-                if hasattr(layer, "has_own"):
-                    if layer.has_own("logger"):
-                        configs.insert(0, layer["logger"])
-                else:
-                    configs.insert(0, dict.get(layer, "logger"))
-        result: LoggerIntercept = {}
-        for config in configs:
-            if isinstance(config, dict):
-                result.update(cast(LoggerIntercept, config))
-        return result
+        return cast(LoggerIntercept, resolve_intercept_config(self))
 
     # -- level shortcuts -----------------------------------------------------
     def error(self, *args: Any) -> None:

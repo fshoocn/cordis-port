@@ -28,26 +28,40 @@
 | 上游仓库 | [cordiverse/cordis](https://github.com/cordiverse/cordis) |
 | 目标包 | `packages/core`（npm 包名 `cordis`） |
 | 分支 | `main` |
-| 提交 | [`c261dd2c13d65b1994adb1cdc10d7dba61542523`](https://github.com/cordiverse/cordis/commit/c261dd2c13d65b1994adb1cdc10d7dba61542523)（短号 `c261dd2`） |
-| 提交时间 | 2026-10-10 15:43:31 +0800 |
-| 提交说明 | `fix(core): track reload revisions in fiber epochs (#189)` |
-| 上游版本号 | `4.0.0-rc.10` |
-| 文档更新时间 | 2026-10-13 |
+| 提交 | [`bd427d05490b5d04c9e74926167ab3e2901370b8`](https://github.com/cordiverse/cordis/commit/bd427d05490b5d04c9e74926167ab3e2901370b8)（短号 `bd427d0`） |
+| 提交时间 | 2026-10-28 10:34:20 +0800 |
+| 提交说明 | `fix(core): close an async-generator effect when its epoch changes (#268)` |
+| 上游版本号 | `4.0.0-rc.12` |
+| 文档更新时间 | 2026-10-28 |
 
 > 移植基线已逐文件校验：`packages/core/src` 的 9 个源文件按提交 SHA 从上游取回
-> 核对，自上一基线 `f8ea3cd` 起仅 `events.ts` 与 `fiber.ts` 发生变化。
+> 核对。另移植了两项 **Koishi 语义扩展**（上游 v4 尚无）：`inject` 可选依赖、
+> `waterfall` 的 `next(x)` 跨拦截器传值。
 
-**同步记录** —— 2026-10-13 · `f8ea3cd` → `c261dd2`（12 次上游提交，触及
-`packages/core` 的 4 次）：
+**同步记录** —— 2026-10-28 · `c261dd2` → `bd427d0`（触及 `packages/core` 的 13 次）：
 
 | 提交 | 说明 |
 | --- | --- |
-| [`1431598`](https://github.com/cordiverse/cordis/commit/143159831b23ee614523eabc007237829d9223c5) | `feat(core): resolve plugin config on every reload (#134)` |
-| [`9f5e690`](https://github.com/cordiverse/cordis/commit/9f5e69062995a939f5c76b8d503a4421b80a0bf3) | `fix(core): report parallel dispatch mode (#136)` |
-| [`7d0a90d`](https://github.com/cordiverse/cordis/commit/7d0a90dde2cc4ed6d3c1c6294e8f4fd758eb02c4) | `fix(core): dispose internal/update hooks with the fiber (#56)` |
-| [`c261dd2`](https://github.com/cordiverse/cordis/commit/c261dd2c13d65b1994adb1cdc10d7dba61542523) | `fix(core): track reload revisions in fiber epochs (#189)` |
+| [`147e4f2`](https://github.com/cordiverse/cordis/commit/147e4f2) | `fix(core): unregister a service impl after an isolate move (#191)` |
+| [`9cad5e8`](https://github.com/cordiverse/cordis/commit/9cad5e8) | `fix(core): dispose providers after their dependents (#196)` |
+| [`1a87f46`](https://github.com/cordiverse/cordis/commit/1a87f46) | `feat(core): describe the failing event in parallel AggregateError (#205)` |
+| [`7e9eb09`](https://github.com/cordiverse/cordis/commit/7e9eb09) | `feat(core): merge injected metadata before context intercepts (#206)` |
+| [`9aa1415`](https://github.com/cordiverse/cordis/commit/9aa1415) | `refactor(core): move \`ctx.root\` to \`ctx[Context.root]\` (#207)` |
+| [`bc9a344`](https://github.com/cordiverse/cordis/commit/bc9a344) | `fix(core): stop service lookup at isolation boundaries (#209)` |
+| [`5dac695`](https://github.com/cordiverse/cordis/commit/5dac695) | `fix(core): settle disposed fibers to DISPOSED (#133)` |
+| [`1ce0e49`](https://github.com/cordiverse/cordis/commit/1ce0e49) | `fix(logger): log an aggregate error with no usable member (#222)` |
+| [`67538f6`](https://github.com/cordiverse/cordis/commit/67538f6) | `feat(loader): trace config validation issues to their source location (#210)`（核心侧 ValidationError 路径格式化） |
+| [`179658b`](https://github.com/cordiverse/cordis/commit/179658b) | `build: add explicit extensions to relative imports (#125)`（无 Python 影响） |
+| [`bd427d0`](https://github.com/cordiverse/cordis/commit/bd427d05490b5d04c9e74926167ab3e2901370b8) | `fix(core): close an async-generator effect when its epoch changes (#268)` |
 
-其余 8 次为 hmr / loader / create / include / timer 等包的修复，不在移植范围。
+另有 2 次 `chore: bump versions`；其余提交为 hmr / loader / create / include / timer 等包的修复，不在移植范围。
+
+> **移植侧两处对齐说明**：
+> 1. 内置服务（`events`/`registry`/`reflect`/`logger`）也经 `provide` 登记，
+>    因此 `inject = ["logger"]` 可用（Koishi 语义）；
+> 2. 官方 JS 的 async 函数在首个 await 前同步执行，Python 协程要到 await 才启动，
+>    因此 `_reload` 的纪元截取/`committed` 发布与 `_unload` 的 effect 清空改为
+>    「调用点同步执行」，异步生成器的关闭时序与官方一致。
 
 ---
 
@@ -266,9 +280,19 @@ class C(Service):
     def use_counter(self):
         print(self.ctx.counter.n)      # 依赖就绪后被调用
         return lambda: print("bye")    # 返回值可作为清理函数（见下方说明）
+
+# (d) 可选依赖（Koishi 形态）：required 阻塞加载，optional 只通知不阻塞
+class D:
+    inject = {"required": ["counter"], "optional": ["comm"]}
+
+    def __init__(self, ctx, config):
+        self.comm = ctx.comm           # comm 缺席时为 None，不报错
 ```
 
-依赖满足前 fiber 停留在 `PENDING`；服务出现后自动切换为 `ACTIVE`。
+必需依赖满足前 fiber 停留在 `PENDING`；服务出现后自动切换为 `ACTIVE`。
+**可选依赖**（`optional`）不参与纪元计算：缺席不阻塞加载，访问返回 `None`；
+出现/消失只经 `internal/service` 事件通知，不触发重载——适合「可增强、不阻塞」
+的软依赖（例如日志出口的 `comm`，用事件驱动替代热路径轮询）。
 
 > **关于 `@Inject` 方法装饰器**（与上游设计一致）
 >
@@ -317,7 +341,16 @@ await ctx.parallel("greet", "world")
 # waterfall：链式传递，用 next() 决定是否继续
 ctx.on("calc", lambda next: next() + 1)
 print(ctx.waterfall("calc", lambda: 41))   # 42
+
+# next(x) 跨拦截器传值：参数覆盖「值」（首个实参），后续监听器收到 x
+ctx.on("calc", lambda value, next: next(value * 10))
+ctx.on("calc", lambda value, next: value + next())
+print(ctx.waterfall("calc", 1, lambda: 1))   # 11
 ```
+
+`waterfall` 的值传递语义（对齐 cordis/Koishi）：`next(x)` 的参数覆盖传给
+后续监听器的值（不传则沿用）；`next()` 的**返回值**是剩余链条的结果
+（含末尾 `inner` 的返回值），监听器可后处理再向上传播。`inner` 始终无参调用。
 
 其它要点：
 
@@ -349,7 +382,7 @@ class CfgService(Service):
     provide = "cfgsvc"
 
     def load(self):
-        cfg = self.__resolve_config__() or {}
+        cfg = self.__resolve_intercept__() or {}
         return cfg.get("mode", "default")
 
 fast_ctx = ctx.isolate("cfgsvc").intercept("cfgsvc", {"mode": "fast"})
@@ -474,7 +507,8 @@ print(ctx.logger.buffer[-1].name)
 | `ctx.isolate(name) / intercept(name, cfg)` | 返回新的隔离/拦截上下文 |
 | `ctx.effect(fn, label)` | 创建副作用（fiber 卸载时自动清理） |
 | `ctx.update(cfg) / restart()` | 更新配置 / 重载当前插件 |
-| `ctx.reflect / registry / events / logger / fiber / root / parent` | 内置服务与导航 |
+| `ctx.reflect / registry / events / logger / fiber / parent` | 内置服务与导航 |
+| `ctx[ctx.root_key]` | 根上下文（`ctx.root` 为已弃用别名，官方已移出属性命名空间） |
 
 ### Fiber
 

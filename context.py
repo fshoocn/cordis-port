@@ -30,7 +30,7 @@ API identical.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard, cast, overload
 
 from .utils import ProtoDict, _Symbol, get_symbol, has_symbol, symbols
 
@@ -61,6 +61,12 @@ class _ContextSymbolMethod:
         self.symbol = symbol
         self.method_name = method_name
 
+    @overload
+    def __get__(self, instance: None, owner: type[Context]) -> _Symbol: ...
+
+    @overload
+    def __get__(self, instance: Context, owner: type[Context]) -> Callable[..., Any]: ...
+
     def __get__(
         self, instance: Context | None, owner: type[Context]
     ) -> _Symbol | Callable[..., Any]:
@@ -80,7 +86,7 @@ class Context:
     * 快捷方法：``ctx.on`` / ``ctx.emit`` / ``ctx.plugin`` / ``ctx.provide`` 等
       （由 ``ReflectService._bootstrap`` 的 mixin 挂上，实际转发到对应服务）；
     * 数据：``ctx.foo``（自定义服务或属性）、``ctx[symbol]``（符号槽位）；
-    * 生命周期：``ctx.fiber``、``ctx.root``、``ctx.parent``。
+    * 生命周期：``ctx.fiber``、``ctx[ctx.root_key]``（根上下文）、``ctx.parent``。
     """
 
     # official static symbols —— 官方静态符号（类上访问得符号，实例上访问得方法）
@@ -94,8 +100,9 @@ class Context:
     filter_key = symbols.filter
     isolate_key = symbols.isolate
     intercept_key = symbols.intercept
+    #: 根上下文的符号键（官方 ``Context.root``）：``ctx[ctx.root_key]`` 即根上下文
+    root_key = symbols.root
 
-    root: Context
     baseUrl: str | None
     fiber: Fiber
     reflect: ReflectService
@@ -113,13 +120,14 @@ class Context:
         from .reflect import ReflectService
         from .registry import RegistryService
 
-        # 符号槽位：isolate / intercept 两层初始为空（都是带原型的字典）
+        # 符号槽位：isolate / intercept 两层初始为空（都是带原型的字典），
+        # root 指向自身（根上下文）
         self._symbols = {
             symbols.isolate: ProtoDict(),
             symbols.intercept: ProtoDict(),
+            symbols.root: self,
         }
         self._parent = None
-        self.root = self
         self.baseUrl = None
         self.base_url = None
 
@@ -129,6 +137,10 @@ class Context:
         self.registry = RegistryService(self)
         self.events = EventsService(self)
         self.logger = LoggerService(self)
+        # 内置服务同样登记为 provided 服务（Koishi 语义）：插件可以
+        # `inject = ["logger"]` 声明依赖内置服务，纪元/通知机制一视同仁。
+        for builtin in ("events", "registry", "reflect", "logger"):
+            self.reflect.provide(builtin, self.__dict__[builtin])
         # 上面各服务构造时会把自身 effect 登记到 fiber 上，根 fiber 不需要它们
         self.fiber._disposables.clear()
 
@@ -171,6 +183,15 @@ class Context:
         """严格一些的判定：真实 ``Context`` 实例或自报 ``is_context`` 的对象。"""
         return isinstance(value, Context) or bool(getattr(value, "is_context", False))
 
+    @property
+    def root(self) -> Context:
+        """根上下文（**已弃用**）：改用 ``ctx[ctx.root_key]``。
+
+        官方已把 ``root`` 移出属性命名空间（防止与名为 ``root`` 的服务冲突，
+        见 ``ctx[Context.root]``）；本别名保留兼容，未来可能移除。
+        """
+        return cast("Context", self.__get_symbol__(symbols.root))
+
     def extend(self, meta: Mapping[str | _Symbol, Any] | None = None) -> Context:
         """Port of ``extend``: create a child carrying the same services.
 
@@ -190,7 +211,6 @@ class Context:
         child.__dict__["_symbols"] = {}
         child.__dict__["_parent"] = self
         child.__dict__["_proto"] = self
-        child.__dict__["root"] = self.root
         child.__dict__["baseUrl"] = self.baseUrl
         child.__dict__["base_url"] = self.baseUrl
         child.__dict__["reflect"] = self.reflect.for_context(child)
@@ -228,7 +248,7 @@ class Context:
         """Port of ``intercept``: stack a config layer for ``name``.
 
         为 ``name`` 叠加一层配置（``config``）：越靠近当前上下文的层优先级越高。
-        服务可通过 ``ctx.resolveConfig`` 读到自己那份被覆盖的配置。
+        服务可通过 ``__resolve_intercept__`` 读到自己那份被覆盖的配置。
         """
         current = self.__get_symbol__(symbols.intercept, None)
         if not isinstance(current, ProtoDict):

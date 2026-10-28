@@ -92,9 +92,11 @@ from .reflect import (
     ReflectService,
     enhance_error,
     is_special_property,
+    locate,
 )
 from .registry import (
     Inject,
+    InjectEntry,
     InjectSpec,
     PluginBase,
     PluginCallback,
@@ -194,6 +196,7 @@ __all__ = [
     "Hook",
     "Impl",
     "Inject",
+    "InjectEntry",
     "InjectSpec",
     "Logger",
     "LoggerIntercept",
@@ -267,6 +270,7 @@ __all__ = [
     "is_special_property",
     "joinPrototype",
     "join_prototype",
+    "locate",
     "register_protocol",
     "resolveConfig",
     "resolveInject",
